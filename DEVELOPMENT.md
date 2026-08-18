@@ -13,5 +13,5 @@
 ## 当前状态
 
 - 全部测试绿（258 passed）；`verify_ocsr_skill.py` 离线校验通过
-- 分发渠道：`cenglin123/cenglins-skills` 的 `skills/ocsr` 子目录（cc-switch 拉取源），本仓为其上游开发仓
+- 本仓是唯一 SSOT：cc-switch 直接从本仓根目录安装（单跳，与 converge-skill 同构）；早期曾短暂经 `cenglins-skills` 合集分发，2026-08-18 迁出
 - 已知边界见 `docs/pitfalls.md` 与 `refs/pitfalls-reference.md`
