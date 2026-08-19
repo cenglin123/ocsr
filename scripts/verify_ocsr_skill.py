@@ -324,7 +324,7 @@ def check_telemetry_fields():
 
 
 def check_allowlist():
-    """Verify ALLOWED_MODELS is defined in ocsr_dispatch.py and has exactly 3 entries."""
+    """Verify the user-editable model allowlist loads as a non-empty frozenset."""
     ok = True
     allowed = getattr(_DISPATCH_MOD, "ALLOWED_MODELS", None) if _DISPATCH_MOD else None
     if allowed is None:
@@ -333,21 +333,15 @@ def check_allowlist():
     if not isinstance(allowed, frozenset):
         print("FAIL: ALLOWED_MODELS is not a frozenset")
         ok = False
-    if len(allowed) != 3:
-        print(f"FAIL: ALLOWED_MODELS has {len(allowed)} entries, expected 3")
+    if not allowed:
+        print("FAIL: ALLOWED_MODELS is empty")
         ok = False
-    expected = frozenset({
-        "deepseek/deepseek-v4-flash",
-        "xiaomi/mimo-v2.5",
-        "xiaomi/mimo-v2.5-pro",
-    })
-    if allowed != expected:
-        print(f"FAIL: ALLOWED_MODELS mismatch")
-        print(f"  expected: {sorted(expected)}")
-        print(f"  got:      {sorted(allowed) if allowed else '?'}")
+    config_path = getattr(_DISPATCH_MOD, "ALLOWED_MODELS_PATH", None) if _DISPATCH_MOD else None
+    if not config_path or not config_path.is_file():
+        print("FAIL: user-editable allowed-models.json not found")
         ok = False
     if ok:
-        print(f"PASS: ALLOWED_MODELS has exactly 3 entries: {', '.join(sorted(allowed))}")
+        print(f"PASS: user-editable ALLOWED_MODELS loaded: {', '.join(sorted(allowed))}")
     return ok
 
 

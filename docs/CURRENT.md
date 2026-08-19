@@ -5,7 +5,7 @@
 ## 当前状态
 
 - 派发驱动器为默认派发路径：`scripts/ocsr_dispatch.py`（dispatch/run/selftest/telemetry/summary/monitor/verify-ownership/preflight）。
-- **模型白名单**（2026-08-18 起三个 qualified ID）：`deepseek/deepseek-v4-flash`、`xiaomi/mimo-v2.5`、`xiaomi/mimo-v2.5-pro`。
+- **模型白名单**：由用户可编辑的 `config/allowed-models.json` 加载；仓库默认仅 `xiaomi/mimo-v2.5`、`xiaomi/mimo-v2.5-pro`。配置必须是非空、无重复的 qualified ID JSON 数组，错误时命令启动 fail-closed。
 - watcher 失败语义分层：exit=0 期望产物缺失时区分「0 产物」与「命名与 pattern 不符」（`_detect_name_mismatch`）。
 - 模型调用 tripwire：测试默认 `OCSR_DISABLE_MODEL_CALLS=1`。
 - 2026-08-19 复验：`verify_ocsr_skill.py`、`agent_links.py check`、`audit.py check` 与 `git diff --check` 通过；`pytest tests/ -q` 为 257 passed、1 failed。失败项 `TestPidCaptureAndKill.test_kill_actually_terminates_process` 的 `taskkill` 返回 `Access denied`，发生在测试启动的 PowerShell 子进程，未改动源码或测试。

@@ -1434,11 +1434,11 @@ class TestModelAllowlist:
             yield
 
     ALLOWED = [
-        "deepseek/deepseek-v4-flash",
         "xiaomi/mimo-v2.5",
         "xiaomi/mimo-v2.5-pro",
     ]
     DISALLOWED = [
+        "deepseek/deepseek-v4-flash",
         "deepseek/deepseek-v4-pro",
         "deepseek/deepseek-v3",
         "deepseek/deepseek-r1",
@@ -1462,10 +1462,37 @@ class TestModelAllowlist:
 
     def test_allowed_models_is_frozenset(self):
         assert isinstance(mod.ALLOWED_MODELS, frozenset)
-        assert len(mod.ALLOWED_MODELS) == 3
+        assert len(mod.ALLOWED_MODELS) == 2
 
     def test_allowed_models_exact_set(self):
         assert mod.ALLOWED_MODELS == frozenset(self.ALLOWED)
+
+    def test_user_editable_allowlist_file_is_loaded(self, tmp_path):
+        path = tmp_path / "allowed-models.json"
+        path.write_text('["vendor/example-model"]', encoding="utf-8")
+        assert mod._load_allowed_models(path) == ("vendor/example-model",)
+
+    @pytest.mark.parametrize("content", [
+        "[]",
+        '["xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5"]',
+        "{}",
+        '[" "]',
+        '[" vendor/model"]',
+        '["vendor/model "]',
+        '["vendor/"]',
+        '["/model"]',
+        '["vendor/model/extra"]',
+        '["vendor /model"]',
+        '["vendor/ model"]',
+    ])
+    def test_invalid_user_editable_allowlist_fails_closed(self, tmp_path, content):
+        path = tmp_path / "allowed-models.json"
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(RuntimeError, match="allowlist"):
+            mod._load_allowed_models(path)
+
+    def test_default_model_is_first_configured_model(self):
+        assert mod.DEFAULT_MODEL == mod._load_allowed_models()[0]
 
     def test_dispatch_rejects_before_launcher(self):
         """dispatch must reject disallowed model before creating any launcher."""
@@ -1530,14 +1557,14 @@ class TestModelCallsTripwire:
         with mock.patch.object(mod, "_check_model_calls_disabled") as mock_check:
             mock_check.side_effect = SystemExit(1)
             with pytest.raises(SystemExit):
-                mod.cmd_selftest(mock.Mock(model="deepseek/deepseek-v4-flash"))
+                mod.cmd_selftest(mock.Mock(model="xiaomi/mimo-v2.5"))
             mock_check.assert_called_once()
 
     def test_tripwire_env_var_checked_at_preflight_entry(self):
         with mock.patch.object(mod, "_check_model_calls_disabled") as mock_check:
             mock_check.side_effect = SystemExit(1)
             with pytest.raises(SystemExit):
-                mod.cmd_preflight(mock.Mock(model=["deepseek/deepseek-v4-flash"], timeout=30))
+                mod.cmd_preflight(mock.Mock(model=["xiaomi/mimo-v2.5"], timeout=30))
             mock_check.assert_called_once()
 
     def test_tripwire_prints_message(self):
@@ -1797,7 +1824,7 @@ class TestForbidBlockInjection:
             class FakeArgs:
                 pass
             args = FakeArgs()
-            args.worker = [f"{prompt_file}|deepseek/deepseek-v4-flash|r1"]
+            args.worker = [f"{prompt_file}|xiaomi/mimo-v2.5|r1"]
             args.output_dir = str(out_dir)
             args.output_pattern = "{label}.md"
             args.stagger = 0
@@ -1839,7 +1866,7 @@ class TestForbidBlockInjection:
             class FakeArgs:
                 pass
             args = FakeArgs()
-            args.worker = [f"{prompt_file}|deepseek/deepseek-v4-flash|r1"]
+            args.worker = [f"{prompt_file}|xiaomi/mimo-v2.5|r1"]
             args.output_dir = str(out_dir)
             args.output_pattern = "{label}.md"
             args.stagger = 0

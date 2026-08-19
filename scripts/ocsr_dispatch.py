@@ -141,11 +141,33 @@ _USER_HOME = str(Path.home())
 _USER_HOME_FORWARD = _USER_HOME.replace("\\", "/")
 
 # ─── 模型白名单 ───────────────────────────────────────────────────────
-ALLOWED_MODELS = frozenset({
-    "deepseek/deepseek-v4-flash",
-    "xiaomi/mimo-v2.5",
-    "xiaomi/mimo-v2.5-pro",
-})
+ALLOWED_MODELS_PATH = Path(__file__).resolve().parents[1] / "config" / "allowed-models.json"
+
+
+def _load_allowed_models(path: Path = ALLOWED_MODELS_PATH) -> tuple[str, ...]:
+    """Load the user-editable model allowlist and fail closed on bad configuration."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot load OCSR model allowlist from {path}: {exc}") from exc
+    if not isinstance(raw, list) or not raw or any(
+        not isinstance(item, str)
+        or (parts := item.split("/")) != [part.strip() for part in parts]
+        or len(parts) != 2
+        or not all(parts)
+        for item in raw
+    ):
+        raise RuntimeError(
+            f"OCSR model allowlist at {path} must be a non-empty JSON array of provider/model IDs."
+        )
+    if len(raw) != len(set(raw)):
+        raise RuntimeError(f"OCSR model allowlist at {path} contains duplicate model IDs.")
+    return tuple(raw)
+
+
+_CONFIGURED_MODELS = _load_allowed_models()
+ALLOWED_MODELS = frozenset(_CONFIGURED_MODELS)
+DEFAULT_MODEL = _CONFIGURED_MODELS[0]
 
 
 def _validate_model_allowed(model: str) -> None:
@@ -1367,7 +1389,7 @@ def _watch_loop(
 def cmd_selftest(args) -> int:
     """冒烟测试：生成 trivial prompt → 派发 → 回收 → 验证。"""
     _check_model_calls_disabled()
-    model = args.model or "deepseek/deepseek-v4-flash"
+    model = args.model or DEFAULT_MODEL
     try:
         _validate_model_allowed(model)
     except ValueError as e:
@@ -2157,7 +2179,7 @@ def main():
 
     # selftest
     p_test = sub.add_parser("selftest", help="冒烟测试")
-    p_test.add_argument("--model", help="测试用模型 (默认 deepseek/deepseek-v4-flash)")
+    p_test.add_argument("--model", help="测试用模型 (默认配置文件首项)")
     p_test.add_argument("--output-dir", help="产物落盘目录")
     p_test.add_argument("--work-dir", help="临时目录")
 

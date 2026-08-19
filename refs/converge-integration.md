@@ -13,7 +13,7 @@ python <converge-scripts>/ocsr_spawn_adapter.py dispatch \
   --ocsr-dispatch <ocsr-scripts>/ocsr_dispatch.py \
   --role outer-reviewer --phase reviewer-round-1 --round 1 --attempt 1 \
   --prompt <abs prompt path> \
-  --model xiaomi/mimo-v2.5-pro --label r1-reviewer \
+  --model <qualified-id> --label r1-reviewer \
   --output-dir <active-dir> --output-name round-1.md \
   --watch --timeout 20
 ```

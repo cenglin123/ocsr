@@ -36,4 +36,4 @@
 
 **保护默认**：凭据文件（`.env*`、`*.pem`、路径含 `secret`/`credential`/`api_key`/`sk-` 字面量）与非本任务的临时/收敛目录（如其他 slug 的 `.converge/tmp/`、其他 slug 的收敛 active/done 目录）默认视为不可删除项，不得出现在 `cleanup_manifest` 中——即使看起来像"垃圾文件"。
 
-**模型选择**：机械收尾（文档同步、manifest 生成、数字核对）用执行档 `deepseek/deepseek-v4-flash`（见 [模型默认池](model-defaults.md)）；涉及需要判断的一致性核验（如"retrospective 是否准确反映实际过程"）按判断密集角色升级，不强行用执行档模型做语义判断。
+**模型选择**：仓库默认配置中，机械收尾（文档同步、manifest 生成、数字核对）用执行档 `xiaomi/mimo-v2.5`（见 [模型默认池](model-defaults.md)）；用户改动白名单后，必须改用当前配置中可用且通过 preflight 的模型。涉及需要判断的一致性核验（如"retrospective 是否准确反映实际过程"）按判断密集角色升级，不强行用执行档模型做语义判断。
