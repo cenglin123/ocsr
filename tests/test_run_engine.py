@@ -487,7 +487,7 @@ run: {id: t, workdir: __WD__}
 steps:
   - id: d
     type: dispatch
-    model: deepseek/deepseek-v4-flash
+    model: xiaomi/mimo-v2.5
     prompt: p.txt
     output: "%s"
 """
@@ -500,7 +500,7 @@ steps:
         """阶段 5 未接线时必须明确失败，不得假装成功。"""
         with tempfile.TemporaryDirectory() as t:
             s = self._scene(Path(t), "{{run.workdir}}/out.md")
-            assert s.run(allowed_models={"deepseek/deepseek-v4-flash"}) == rs.EXIT_STEP_FAILED
+            assert s.run(allowed_models={"xiaomi/mimo-v2.5"}) == rs.EXIT_STEP_FAILED
             assert "阶段 5" in s.events("step-completed")[0]["detail"]
 
     def test_output_outside_workdir_rejected(self):
@@ -509,7 +509,7 @@ steps:
             td = Path(t)
             s = self._scene(td, (td / "elsewhere.md").as_posix())
             called = []
-            rc = s.run(allowed_models={"deepseek/deepseek-v4-flash"},
+            rc = s.run(allowed_models={"xiaomi/mimo-v2.5"},
                        dispatch_fn=lambda *a: called.append(a) or 0)
             assert rc == rs.EXIT_STEP_FAILED
             assert not called, "越界产物路径必须在派发前就被拒绝"
@@ -526,14 +526,14 @@ steps:
                 Path(out_path).write_text("done", encoding="utf-8")
                 return 0
 
-            assert s.run(allowed_models={"deepseek/deepseek-v4-flash"},
+            assert s.run(allowed_models={"xiaomi/mimo-v2.5"},
                          dispatch_fn=fake) == rs.EXIT_OK
             assert seen["sid"] == "d"
 
     def test_dispatch_nonzero_rc_fails_step(self):
         with tempfile.TemporaryDirectory() as t:
             s = self._scene(Path(t), "{{run.workdir}}/out.md")
-            rc = s.run(allowed_models={"deepseek/deepseek-v4-flash"},
+            rc = s.run(allowed_models={"xiaomi/mimo-v2.5"},
                        dispatch_fn=lambda *a: 2)
             assert rc == rs.EXIT_STEP_FAILED
             assert "rc=2" in s.events("step-completed")[0]["detail"]

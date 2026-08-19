@@ -28,7 +28,7 @@
 
 | Phase | Deliverable | File | Owner | Spawn Label | Status |
 |-------|-------------|------|-------|-------------|--------|
-| Phase 1 | 评审报告 | rounds/round-1.md | xiaomi/mimo-v2.5-pro | spawned:r1-reviewer | done |
+| Phase 1 | 评审报告 | rounds/round-1.md | <configured-reviewer-model> | spawned:r1-reviewer | done |
 
 `Spawn Label` 取值 `spawned:<label>`（对应 ledger 中的派发标签）或 `self-written`（orchestrator 自行写入）。
 

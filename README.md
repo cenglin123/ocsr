@@ -1,6 +1,6 @@
 # OCSR
 
-OCSR（OpenCode Subagents Run）把 headless `opencode run` 用作独立于宿主框架的子代理执行后端，适合跨厂商异构模型、廉价批处理 worker 和 fresh-context 对抗评审；亦提供层级指挥模式（planner / orchestrator / worker 分层编排，见 [层级指挥专题](refs/hierarchical-command.md)）。
+OCSR（OpenCode Subagents Run）把 headless `opencode run` 用作独立于宿主框架的子代理执行后端，适合可配置模型的批处理 worker 和 fresh-context 对抗评审；亦提供层级指挥模式（planner / orchestrator / worker 分层编排，见 [层级指挥专题](refs/hierarchical-command.md)）。
 
 ## 快速开始
 
@@ -8,7 +8,8 @@ OCSR（OpenCode Subagents Run）把 headless `opencode run` 用作独立于宿�
 
 ```powershell
 opencode models
-opencode run "请完成一个自包含任务" -m deepseek/deepseek-v4-flash
+# <qualified-id> 必须存在于 config/allowed-models.json
+opencode run "请完成一个自包含任务" -m <qualified-id>
 python scripts/verify_ocsr_skill.py
 ```
 

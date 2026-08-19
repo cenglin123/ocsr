@@ -32,7 +32,7 @@ _SPEC.loader.exec_module(rs)
 
 yaml = pytest.importorskip("yaml", reason="spec 校验依赖 PyYAML")
 
-ALLOWED = {"deepseek/deepseek-v4-flash", "xiaomi/mimo-v2.5-pro"}
+ALLOWED = {"xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5-pro"}
 
 
 def _write(td: Path, text: str, name: str = "spec.yaml") -> Path:

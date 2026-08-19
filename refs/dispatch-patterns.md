@@ -79,8 +79,8 @@
    ```powershell
    # launcher.ps1
    $prompt = Get-Content "$PSScriptRoot\prompt.txt" -Raw -Encoding UTF8
-    opencode run $prompt -m xiaomi/mimo-v2.5-pro --title reviewer-r1 *> "$PSScriptRoot\run.log"
-    # OCSR 可选模型仅限: deepseek/deepseek-v4-flash, xiaomi/mimo-v2.5, xiaomi/mimo-v2.5-pro
+    opencode run $prompt -m <qualified-id> --title reviewer-r1 *> "$PSScriptRoot\run.log"
+    # 可用模型以仓库根目录 config/allowed-models.json 为准
    ```
 2. 用 `Start-Process` 完全脱离 harness 生命周期启动（`-WindowStyle Hidden` 不弹窗）：
    ```powershell
@@ -116,7 +116,7 @@ $timeoutSec = 600
 $jobs = foreach ($w in $workers) {   # $workers: 每项含 promptFile / log
   Start-Job -ScriptBlock {
     param($promptFile, $log)
-    opencode run (Get-Content $promptFile -Raw -Encoding UTF8) -m deepseek/deepseek-v4-flash *> $log
+    opencode run (Get-Content $promptFile -Raw -Encoding UTF8) -m <qualified-id> *> $log
   } -ArgumentList $w.promptFile, $w.log
 }
 # 有限超时等待——不再无限 Wait-Job
@@ -137,7 +137,7 @@ $jobs | Remove-Job
 
 ```bash
 for f in prompts/worker-*.txt; do
-  opencode run "$(cat "$f")" -m deepseek/deepseek-v4-flash > "logs/$(basename "$f" .txt).log" 2>&1 &
+  opencode run "$(cat "$f")" -m <qualified-id> > "logs/$(basename "$f" .txt).log" 2>&1 &
 done
 wait
 ```
@@ -158,14 +158,14 @@ wait
 # 基本：positional message
 opencode run "你的 prompt 内容"
 
-# 指定模型（跨厂商异构的关键能力）
-opencode run "你的 prompt" -m deepseek/deepseek-v4-flash
+# 指定模型（须在 config/allowed-models.json 中）
+opencode run "你的 prompt" -m <qualified-id>
 
 # 常用附加参数
-opencode run "你的 prompt" -m xiaomi/mimo-v2.5-pro --format json --title reviewer-r1
+opencode run "你的 prompt" -m <qualified-id> --format json --title reviewer-r1
 
 # 设定子代理工作目录（仅提示性质，不构成安全沙箱）
-opencode run "你的 prompt" -m deepseek/deepseek-v4-flash --dir C:\work\sandbox
+opencode run "你的 prompt" -m <qualified-id> --dir C:\work\sandbox
 ```
 
 长 prompt 别在命令行里拼（转义地狱）——写入临时文件再传。写入时也要显式 UTF-8（Windows PowerShell 5.1 的 `Set-Content` 默认 ANSI，会写坏中文）：
@@ -175,11 +175,11 @@ Set-Content -Path .\prompts\worker-01.txt -Value $prompt -Encoding UTF8
 ```
 
 ```powershell
-opencode run (Get-Content .\prompts\worker-01.txt -Raw -Encoding UTF8) -m deepseek/deepseek-v4-flash
+opencode run (Get-Content .\prompts\worker-01.txt -Raw -Encoding UTF8) -m <qualified-id>
 ```
 
 ```bash
-opencode run "$(cat prompts/worker-01.txt)" -m deepseek/deepseek-v4-flash
+opencode run "$(cat prompts/worker-01.txt)" -m <qualified-id>
 ```
 
 ## Windows 中文编码策略细节
