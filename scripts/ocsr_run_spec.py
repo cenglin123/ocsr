@@ -5,7 +5,7 @@
 对应 `docs/plans/active/20260810-deterministic-run-spec.md` 的 D1/D2/D3/D4/D8/D10。
 本模块**只做离线校验与确定性展开**，不发起任何模型调用、不启动任何进程。
 
-设计约束（与 SKILL.md §三 三分判据对齐）：
+设计约束（与 SKILL.md 的 `run --spec` 默认边界对齐）：
   ① 机制不执行任务本身 —— 本模块不写 prompt、不判 verdict、不裁决分歧
   ② 不收窄编排空间 —— spec 由调用方撰写；`pause` 步骤可在任意点交回控制权
   ③ 契约违反 fail-closed —— schema/图/引用/取值器任一不合法即拒绝该 spec
@@ -742,16 +742,17 @@ def _resolve_value(ref: str, ctx: dict) -> Any:
 
 # ─── 取值与路由 ──────────────────────────────────────────────────────
 
-def extract_value(expr: str, *, text: str, exitcode: int) -> str:
+def extract_value(expr: str, *, text: str, exitcode: int) -> str | None:
     """按封闭枚举取值。**不做任何判断**——只是确定性解析。
 
     取值来源（`text`）按步骤类型确定，二者刻意不同：
 
     - `hook` 步骤   → 进程的 **stdout + stderr**（外部命令的自然产出）
     - `dispatch` 步骤 → **产物文件的内容**（子代理的报告写在文件里，不靠 stdout 回传，
-      这正是 SKILL.md §五「不采信自我报告、只信文件系统证据」的直接体现）
+      这正是 SKILL.md「默认单 worker 闭环」中“不采信自我报告、只信文件系统证据”的直接体现）
 
-    `assert` 步骤只能用 `exitcode`（它不产生文本产出）。
+    `assert` 步骤只能用 `exitcode`（它不产生文本产出）。返回 ``None`` 表示
+    无法得到一个明确、非空的值；这不是未知路由值，调用方必须 fail-closed。
     """
     if expr == "exitcode":
         return str(exitcode)
@@ -761,26 +762,29 @@ def extract_value(expr: str, *, text: str, exitcode: int) -> str:
     if expr.startswith("regex:"):
         m = re.search(expr[len("regex:"):], text, re.MULTILINE | re.DOTALL)
         if not m:
-            return ""
+            return None
         if m.groupdict():
-            return next((v for v in m.groupdict().values() if v is not None), "")
-        return m.group(1) if m.groups() else m.group(0)
+            value = next((v for v in m.groupdict().values() if v is not None), "")
+        else:
+            value = m.group(1) if m.groups() else m.group(0)
+        return value if value else None
     raise RunHalt(EXIT_SPEC_INVALID, f"未知取值器: {expr}")
 
 
-def _first_yaml_top_key(text: str, key: str) -> str:
-    """取产物中第一个 fenced YAML 块的顶层键；无 fenced 块则退回全文。"""
+def _first_yaml_top_key(text: str, key: str) -> str | None:
+    """只取第一个 fenced YAML 块的顶层键；其余块和全文都不参与兜底。"""
     import yaml  # 校验期已确认可用
     blocks = re.findall(r"```(?:ya?ml)?\s*\n(.*?)```", text, re.DOTALL)
-    for block in list(blocks) + [text]:
-        try:
-            data = yaml.safe_load(block)
-        except Exception:
-            continue
-        if isinstance(data, dict) and key in data:
-            val = data[key]
-            return "" if val is None else str(val)
-    return ""
+    if not blocks:
+        return None
+    try:
+        data = yaml.safe_load(blocks[0])
+    except Exception:
+        return None
+    if not isinstance(data, dict) or key not in data:
+        return None
+    value = "" if data[key] is None else str(data[key])
+    return value if value else None
 
 
 def route_next(step: dict, value: str) -> tuple[str | None, str]:
@@ -1046,6 +1050,14 @@ def execute(spec: dict, spec_path: Path, *, resume: bool = False,
         if extract:
             name = step.get("route_on") or next(iter(extract))
             route_key = extract_value(extract[name], text=text, exitcode=rc)
+            if route_key is None:
+                detail = (f"路由键 `{name}` 无法从 `{extract[name]}` 得到非空、明确的值；"
+                          "抽取失败不得走 `*` 兜底路由")
+                journal.append("step-completed", step=sid, status="failed",
+                               detail=detail, captures=caps_for_journal)
+                journal.append("run-finished", status="failed")
+                print(f"[run] ❌ {sid} 失败: {detail}", file=sys.stderr)
+                return EXIT_STEP_FAILED
         nxt, matched = route_next(step, route_key)
         journal.append("step-completed", step=sid, status="ok", next=nxt,
                        route_key=route_key, route_matched=matched,

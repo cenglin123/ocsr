@@ -1,6 +1,6 @@
 # 当前状态与交接
 
-更新时间：2026-08-18
+更新时间：2026-08-19
 
 ## 当前状态
 
@@ -8,7 +8,8 @@
 - **模型白名单**（2026-08-18 起三个 qualified ID）：`deepseek/deepseek-v4-flash`、`xiaomi/mimo-v2.5`、`xiaomi/mimo-v2.5-pro`。
 - watcher 失败语义分层：exit=0 期望产物缺失时区分「0 产物」与「命名与 pattern 不符」（`_detect_name_mismatch`）。
 - 模型调用 tripwire：测试默认 `OCSR_DISABLE_MODEL_CALLS=1`。
-- `verify_ocsr_skill.py` / `agent_links.py check` / `audit.py check` / `pytest tests/ -q` 全部通过（258 passed）。
+- 2026-08-19 复验：`verify_ocsr_skill.py`、`agent_links.py check`、`audit.py check` 与 `git diff --check` 通过；`pytest tests/ -q` 为 257 passed、1 failed。失败项 `TestPidCaptureAndKill.test_kill_actually_terminates_process` 的 `taskkill` 返回 `Access denied`，发生在测试启动的 PowerShell 子进程，未改动源码或测试。
+- OCSR 渐进式披露重构已实施，并经最终独立终验批准：`SKILL.md` 仅保留默认单 worker 闭环与全局不变量；按能力条件加载各 `refs/`。fresh 对抗评审细则唯一收敛在 `refs/failure-modes.md`；派发失败切换、静默停滞与终止细则收敛在 `refs/dispatch-patterns.md`；`run --spec` 仅让“已提取但未命中具名 route”的值通过 `"*"` 暂停，其他契约失败 fail-closed。2026-08-19 已清除活动源、文档与测试中指向旧 `SKILL.md` 章节编号的导航，改为具名入口或直接专题链接；定向 `run-spec`/派发回归为 231 passed。
 
 ## 接手顺序
 

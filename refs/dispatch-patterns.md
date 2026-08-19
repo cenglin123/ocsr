@@ -1,10 +1,10 @@
 # 派发操作模板与通道选择判据 — 详细参考
 
-> 本文件从 SKILL.md §一/§三 下沉，收纳可复制代码模板与完整判据。主文件保留高频纪律（看门狗阈值、失败切换阶梯、并发纪律等）与本文件的入口指针。
+> 本文件由 [`SKILL.md`](../SKILL.md) 委托，收纳并发、脱管、失败看护与可复制命令的详细操作；不得放宽主文件的预算、证据、重派上限或“非安全沙箱”边界。
 
 ## 通道选择判据（OCSR vs 框架原生子代理）
 
-**通道选择判据**（某角色用 OCSR 还是框架原生子代理）：不枚举任务类型，按两条通用原则判断——本判据假设已通过上方「不用」判定需要派发，仅在选通道时生效——(a) **角色的价值来源**：评审的价值在跨 family 覆盖以规避同族盲区（`opencode run` 可跨厂商选模型、且天然全新上下文 → 评审类角色默认走 OCSR）；修复的核心价值在规格执行精度——确定性修复（规格逐字、验收客观）与通道无关；但修复含判断成分、或修复者与原作者同族时，跨族 executor 有规避共同盲区的价值（参照 converge 模型分层：确定性规格 + 用户授权 + 确定性验收是换通道/降档的安全前提）。(b) **协议成本与模型成本的双侧账本**：自足 prompt + 产物回收 + 看门狗是固定协议开销，任务越小占比越高；另一侧是模型档位——原生 executor 默认 inherit 主模型（验收链短但贵），OCSR 执行档便宜一个量级（验收链长但省），总效率最高的选择必须把两侧都计入。临界点无固定值，以本机遥测（§八 dispatch-log 的 wall_min / artifact_bytes）校准；本判据基于 2026-07 的模型能力与协议成本，随演进可能变化。判别样例（直觉参考，非决策规则）：几行的文字修复用原生 executor；批量转换、长收尾、成本敏感场景用 OCSR（模式 A/D）。
+**通道选择判据**（某角色用 OCSR 还是框架原生子代理）：不枚举任务类型，按两条通用原则判断——本判据假设已通过主文件的「不要派发」判断，仅在选通道时生效——(a) **角色的价值来源**：评审的价值在跨 family 覆盖以规避同族盲区（`opencode run` 可跨厂商选模型、且天然全新上下文 → 评审类角色默认走 OCSR）；修复的核心价值在规格执行精度——确定性修复（规格逐字、验收客观）与通道无关；但修复含判断成分、或修复者与原作者同族时，跨族 executor 有规避共同盲区的价值（参照 converge 模型分层：确定性规格 + 用户授权 + 确定性验收是换通道/降档的安全前提）。(b) **协议成本与模型成本的双侧账本**：自足 prompt + 产物回收 + 看门狗是固定协议开销，任务越小占比越高；另一侧是模型档位——原生 executor 默认 inherit 主模型（验收链短但贵），OCSR 执行档便宜一个量级（验收链长但省），总效率最高的选择必须把两侧都计入。临界点无固定值，以本文件的 `dispatch-log` 遥测（`wall_min` / `artifact_bytes`）校准；本判据基于 2026-07 的模型能力与协议成本，随演进可能变化。判别样例（直觉参考，非决策规则）：几行的文字修复用原生 executor；批量转换、长收尾、成本敏感场景用 OCSR。
 
 ## 退出码契约（`ocsr_dispatch.py dispatch --watch`）
 
@@ -31,7 +31,7 @@
 
 **`exit=0 且零产物` 为何算失败**：`_watch_loop` 判定进程结束只看
 `exit_code is not None`，退出码为 0 同样成立。「opencode 正常退出但期望产物没落盘」
-是 SKILL.md §五「越界写入 / 路径碰撞」的典型指纹（子代理自选文件名写到了别处）。
+是 [`failure-modes.md` 的“越界写入 / 路径碰撞”](failure-modes.md#越界写入--路径碰撞)的典型指纹（子代理自选文件名写到了别处）。
 若契约只覆盖「非零退出」，这条真实终结路径会继续表现为成功。
 该情形的遥测 `outcome_detail` 为 `error:exit_0_no_artifact`，便于事后归因。
 
@@ -43,23 +43,35 @@
 （`ocsr_spawn_adapter.py`，位于 converge 仓库）需相应接线，
 把 `2` 解读为「spawn 确定性失败」而非未知错误，并据此 settle。
 
-## 评审锚定防护（--forbid-paths 与 staging 布局）
+## fresh 对抗评审
 
-> 动机：评审子代理读取并行/前轮 reviewer 报告会摧毁独立性（2026-08-04 ultraverge R2 事件）。禁令只靠 prompt 自觉不够——驱动器提供机械注入与落盘后审计。注意：本节机制与 prompt 禁令同为 best-effort，不构成安全沙箱（SKILL.md §七）。
+评审的布局隔离、`--forbid-paths` 注入、`reads:` 审计及作废/新会话重派，完整且唯一地定义在 [`failure-modes.md`](failure-modes.md#fresh-对抗评审完整闭环)。本文件不重复该规则。
 
-```bash
-python scripts/ocsr_dispatch.py dispatch   --worker "prompts/r1.md|xiaomi/mimo-v2.5-pro|R1"   --output-dir <round 输出目录> --output-pattern "reviewer-{label}.yaml"   --forbid-paths <收敛工作目录> --forbid-paths <其他 reviewer 报告目录>   --watch
-```
+## 失败看护与切换
 
-- **注入**：驱动器在每个 worker 的 prompt 副本末尾追加禁止块（原 prompt 文件不改动），列出全部禁止路径，并要求报告的执行证据含结构化 `reads:` 列表（实际读取的文件路径）。
-- **审计**：watch 模式产物落盘后，驱动器解析 `reads:` 并与禁止路径对照（子路径命中、Windows 大小写不敏感），输出 `clean / violated(<路径>) / unavailable(未含 reads)` 并写入遥测 `read_audit` 字段。**审计不改变退出码**——violated 的处置（作废重派 / 降级保留）由 orchestrator 按 SKILL.md §五 准则裁决。
-- **布局约定**：被审产物 staging 与收敛工作目录不共享可读父树（推荐 `.converge/tmp/staging-<slug>/` 放产物、`.converge/active/<slug>/` 只放编排证据）；无法分离时 `--forbid-paths` 为必备兜底。
+### 静默停滞、阈值与终止
+
+**静默停滞**仅在三条同时满足时成立：`opencode` 进程仍存活、输出日志为 0 字节、且没有派生子进程，并已超过看门狗阈值。三条缺一不可：层级指挥的 orchestrator 等待自身 worker 时日志静止是正常等待，不得误杀。进程已被终止则是通道 kill 指纹，不是静默停滞。
+
+每个脱管或后台进程必须设硬阈值：有本机实测时为 `max(10 分钟, 1.5 × 该模型该角色实测单轮耗时)`；无样本时默认 15 分钟；单一大规模长任务可设 60 分钟。至少积累 5 次同类遥测样本才可调整默认模型或阈值。阈值到期后按 `--timeout-policy` 的解析结果处理，并如实记录；不得以无限轮询代替看护。
+
+手动终止前必须逐项记录：已达到该进程阈值、无派生子进程、日志尾部不显示正在执行、以及已评估中断副作用。只按目标 PID 终止，禁止按镜像名批量杀死兄弟 worker；中断后扫描残留并实跑项目验证。
+
+### 失败切换阶梯
+
+仅对无副作用或已证明幂等的 worker，且三次总尝试上限内执行：
+
+1. 第 1 次失败：同模型重派一次，以排除偶发 API 抖动。
+2. 第 2 次失败：第 3 次尝试切换到不同 `family`；先以 `opencode models --verbose` 和 `preflight --model <qualified-id>` 验证目标，再把前两次失败原因写进新 prompt 的“边界与禁区”。
+3. 第 3 次失败：停止、保留失败日志和产物证据，交回用户选择换模型、缩小任务、提高预算或终止。
+
+若失败明确归因于通道（例如日志 0 字节、无产物且进程已被终止），先修通道而不换模型；这次修复仍计入三次总尝试上限，但不计作“同模型重派一次”。不得借通道问题无限重试。
 
 ## 脱管派发模式（前台超时不够用时）— 完整三步模板
 
 > **入口条件**：当 `scripts/ocsr_dispatch.py` 可用时优先用驱动器 `dispatch --watch`；仅当驱动器不可用（非本机环境、脚本缺失）时回退本节手写模式。
 
-当 harness 前台 shell 工具的超时上限 **小于** 预计单轮耗时（判断密集角色在 harness 规划阶段的估算单轮常 20–30 分钟——含 prompt 构建、排队长尾、完整收敛往返——而多数 harness 前台上限 ≤10 分钟）时，上文"前台 + 大超时"不可用，后台通道又会被 kill（§七）。此时用**脱管派发**：让 `opencode run` 脱离 harness 任务生命周期独立运行，harness 侧只跑一个纯 shell 观察器等产物。
+当 harness 前台 shell 工具的超时上限 **小于** 预计单轮耗时（判断密集角色在 harness 规划阶段的估算单轮常 20–30 分钟——含 prompt 构建、排队长尾、完整收敛往返——而多数 harness 前台上限 ≤10 分钟）时，前台运行不可用，后台通道又会被 kill。此时用**脱管派发**：让 `opencode run` 脱离 harness 任务生命周期独立运行，harness 侧只跑一个纯 shell 观察器等产物。
 
 三步（实证可靠的 Windows 模板）：
 
@@ -78,7 +90,7 @@ python scripts/ocsr_dispatch.py dispatch   --worker "prompts/r1.md|xiaomi/mimo-v
    ```bash
    until [ -f artifact.md ]; do
      if ! tasklist //FI "IMAGENAME eq opencode.exe" | grep -qi opencode; then
-       echo "opencode exited WITHOUT artifact → 失败（见 §五 静默停滞/kill 判定）"; exit 1
+        echo "opencode exited WITHOUT artifact → 确定性失败"; exit 1
      fi
      sleep 15
    done
@@ -89,8 +101,8 @@ python scripts/ocsr_dispatch.py dispatch   --worker "prompts/r1.md|xiaomi/mimo-v
 - 观察器本身是纯 shell 循环，不是 opencode 进程，不受 harness 后台 kill 影响。
 - 产物一律由子代理 Write 直写文件（本节既有纪律），不依赖 stdout 回收。
 - 脱管进程不在 harness 任务生命周期内，因此不被 harness 的后台通道终止——这是它与"后台通道派发"的本质区别（后者把 opencode 进程交给 harness 后台机制管理，会被 kill）。
-- 观察器必须双监视：只盯产物不盯进程，模型端静默停滞时（§五）会无限空等；只盯进程不盯产物，进程正常退出但 0 产物时会误判成功。
-- 观察器自身不限时；超时由 orchestrator 按 §五 看门狗阈值终止底层 opencode 进程，观察器随后检测到进程退出即停止。
+- 观察器必须双监视：只盯产物不盯进程，模型端静默停滞时会无限空等；只盯进程不盯产物，进程正常退出但 0 产物时会误判成功。
+- 观察器自身不限时；超时由 orchestrator 按本文件“静默停滞、阈值与终止”处理底层 opencode 进程，观察器随后检测到进程退出即停止。
 
 ## 并行扇出 — 完整脚本模板
 
@@ -98,7 +110,7 @@ python scripts/ocsr_dispatch.py dispatch   --worker "prompts/r1.md|xiaomi/mimo-v
 
 ```powershell
 # Start-Job 是 PowerShell 进程内后台作业，主控进程用 Wait-Job 存活等待——
-# 与 harness 级后台通道（见上文/§七）不是一回事，可安全使用
+# 与 harness 级后台通道不是一回事，可安全使用
 # 硬超时秒数；先 1 个试点，再从 2 并发上探，遇 429/超时回退
 $timeoutSec = 600
 $jobs = foreach ($w in $workers) {   # $workers: 每项含 promptFile / log
@@ -119,7 +131,7 @@ $timedOut = $jobs | Where-Object State -eq 'Running' | Stop-Job -PassThru
 $failed   = $jobs | Where-Object State -eq 'Failed'
 if ($timedOut) { Write-Warning "$($timedOut.Count) 个 worker 超时" }
 if ($failed)   { Write-Warning "$($failed.Count) 个 worker 失败" }
-# 后续按 §五 逐文件验证，只以产物存在且非0字节为准；不因作业"完成"即判成功
+# 后续按主文件“回收并验收”逐文件验证，只以产物存在且非0字节为准；不因作业"完成"即判成功
 $jobs | Remove-Job
 ```
 
@@ -130,7 +142,7 @@ done
 wait
 ```
 
-并发纪律：每个 worker 独立日志与独立产物路径，失败定位靠 §五 的文件验证而非解析 stdout；**先派 1 个试点 worker 走通链路（§五 验证通过），再逐步从 2 个并发上探**；遇 429/超时回退；扇出前向用户报预计调用数上限与所选模型，未经新鲜授权不突破已披露上限，不静默烧钱。
+并发纪律：每个 worker 独立日志与独立产物路径，失败定位靠主文件“回收并验收”的文件验证而非解析 stdout；**先派 1 个试点 worker 走通链路，再逐步从 2 个并发上探**；遇 429/超时回退；扇出前向用户报预计调用数上限与所选模型，未经新鲜授权不突破已披露上限，不静默烧钱。
 
 ## 多轮续接（版本相关）
 
@@ -140,7 +152,7 @@ wait
 
 ## 基本命令与长 prompt 文件处理
 
-> 从 SKILL.md §三 下沉的可复制命令模板。
+> 由主文件的默认派发闭环按需链接的可复制命令模板。
 
 ```powershell
 # 基本：positional message
@@ -152,7 +164,7 @@ opencode run "你的 prompt" -m deepseek/deepseek-v4-flash
 # 常用附加参数
 opencode run "你的 prompt" -m xiaomi/mimo-v2.5-pro --format json --title reviewer-r1
 
-# 设定子代理工作目录（仅提示性质，不构成沙盒——见 SKILL.md §七）
+# 设定子代理工作目录（仅提示性质，不构成安全沙箱）
 opencode run "你的 prompt" -m deepseek/deepseek-v4-flash --dir C:\work\sandbox
 ```
 
@@ -172,7 +184,7 @@ opencode run "$(cat prompts/worker-01.txt)" -m deepseek/deepseek-v4-flash
 
 ## Windows 中文编码策略细节
 
-> 从 SKILL.md §三 下沉。PS5.1/7 差异表保留在主文件（含 verify 锚点）；本节承载策略展开与失败诊断。
+> 由主文件的默认派发闭环按需链接；本节承载策略展开与失败诊断。
 
 两种推荐策略：
 
@@ -181,11 +193,11 @@ opencode run "$(cat prompts/worker-01.txt)" -m deepseek/deepseek-v4-flash
 
 输入侧：BOM-less UTF-8 的 prompt 文件在 PowerShell 5.1 下会被按 ANSI 误读成乱码，`Get-Content` 必须显式 `-Encoding UTF8`（pwsh 7 默认 UTF-8，但加上此参数两个版本通用）。编码行为随 opencode 版本变化，升级后需重新验证。
 
-失败诊断不依赖 stdout：成败判定以**期望产物文件是否落盘**为准（SKILL.md §五），退出码为辅。日志文件出现乱码时，先区分显示问题还是文件损坏——用 UTF-8 方式重读文件；若文件字节无误则仅为显示层乱码。
+失败诊断不依赖 stdout：成败判定以主文件“回收并验收”的**期望产物文件是否落盘**为准，退出码为辅。日志文件出现乱码时，先区分显示问题还是文件损坏——用 UTF-8 方式重读文件；若文件字节无误则仅为显示层乱码。
 
 ## 派发遥测记录片段（PowerShell）
 
-> 从 SKILL.md §八 下沉的遥测追加行模板；主文件保留 dispatch-log 的语义说明与字段表。
+> 由主文件按需链接的遥测追加行模板。
 
 ```powershell
 [ordered]@{

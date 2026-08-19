@@ -506,7 +506,7 @@ class TestParseOwnershipTable:
         text = """\
 | Phase | Deliverable | File | Owner | Spawn Label | Status |
 |-------|-------------|------|-------|-------------|--------|
-| 2 | SKILL.md §10 | SKILL.md | spawned | ph2-doc, ph2-doc-fix | done |
+| 2 | SKILL.md 默认入口重构 | SKILL.md | spawned | ph2-doc, ph2-doc-fix | done |
 """
         result = mod._parse_ownership_table(text)
         assert result == {"SKILL.md": "spawned:ph2-doc"}
@@ -959,7 +959,7 @@ class TestVerifyOwnership:
                 |-------|-------------|------|-------|-------------|--------|
                 | 1 | monitor cmd | scripts/ocsr_dispatch.py | spawned | ph1-monitor | done |
                 | 1 | monitor tests | tests/test_ocsr_dispatch.py | spawned | ph1-monitor | done |
-                | 2 | SKILL.md §10 | SKILL.md | spawned | ph2-doc, ph2-doc-fix | done |
+                | 2 | SKILL.md 默认入口重构 | SKILL.md | spawned | ph2-doc, ph2-doc-fix | done |
                 | 2 | R1 review | ph2-review-verdict.md | spawned (mimo) | ph2-review | done |
                 | 4 | CHANGELOG | docs/CHANGELOG.md | spawned | ph1-monitor | done |
                 | — | State files | `_orchestrator-state.md` | self-written | — | done |

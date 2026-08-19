@@ -1001,7 +1001,7 @@ def _kill_worker(label: str, wd: Path) -> bool:
 
     现按 `_launch_command` 捕获的真实 PID 终止，并校验 taskkill 退出码。
     `/T` 连带终止子进程（launcher pwsh → opencode）；只杀目标 PID，
-    不使用 `taskkill /IM`——那会连带杀死正在正常工作的兄弟 worker（SKILL.md §五）。
+    不使用 `taskkill /IM`——那会连带杀死正在正常工作的兄弟 worker（见 SKILL.md「默认单 worker 闭环」）。
     """
     pid = _read_pid(wd)
     if pid is None:
@@ -1198,7 +1198,7 @@ def _watch_loop(
                 elapsed = (now - start_times[i]) / 60
                 log_text = log_file.read_text(encoding="utf-8", errors="replace")[:500] if log_file.is_file() else ""
 
-                # DB 锁检测：延迟后自动重派一次（通道例外，SKILL.md §七）
+                # DB 锁检测：延迟后自动重派一次（通道例外，见 refs/dispatch-patterns.md）。
                 # `retried` 与 `retry_count` 职责不同、不可合并：
                 #   retried    → 控制流，「是否已重派过」的确定性布尔语义
                 #   retry_count→ 遥测计数，写入 failure_retry_index
