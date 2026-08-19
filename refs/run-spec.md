@@ -1,6 +1,6 @@
 # `run --spec` 步骤运行器 — 完整 schema 与语义
 
-> 从 SKILL.md §三 下沉。设计依据：`docs/plans/active/20260810-deterministic-run-spec.md`。
+> 由 [`SKILL.md`](../SKILL.md) 委托。设计依据：`docs/plans/active/20260810-deterministic-run-spec.md`。
 > 实现：`scripts/ocsr_run_spec.py`（校验 + 执行）、`ocsr_dispatch.py run`（CLI）。
 
 ## 它解决什么
@@ -67,7 +67,7 @@ steps:                     # 非空；**第一个步骤是入口**
 > 因此**不得声称运行器「不执行任意用户代码」**：那是一句事实性虚假声称。
 > 准确的表述是：运行器**不提供** inline eval/exec 式的步进内代码解释语法，
 > hook 的 argv 由 spec 显式声明、可审计；但**它不是安全沙箱，也不宣称是**——
-> 与 SKILL.md §七「`--dir` 不是沙盒」同源。
+> 与主文件的“非安全沙箱”边界同源。
 > **spec 及其调用的命令必须当作可信输入对待**；不可信 spec 等同于不可信代码。
 
 #### `dispatch` — 派发 OCSR worker
@@ -178,11 +178,12 @@ prompt 存在性与输出目录——不以「已经 `--validate` 过」为由�
 
 - `hook` → 进程的 **stdout + stderr**（外部命令的自然产出）
 - `dispatch` → **产物文件的内容**（子代理的报告写在文件里，不靠 stdout 回传，
-  这正是 SKILL.md §五「不采信自我报告、只信文件系统证据」的直接体现）
+  这正是主文件“回收并验收”的“不采信自我报告、只信文件系统证据”的直接体现）
 - `assert` → 只能用 `exitcode`
 
-`route` **必须**显式写 `"*"` 兜底，且兜底目标**必须**是 `pause` 步骤：
-未预期的取值是**判断分歧**，应 fail-open 交回 agent，而不是让运行器猜。
+仅当 `extract` 已成功产出 `route_on` 的值、但该值未命中任何具名 route 时，`route` 才会使用**必填**的 `"*"` 兜底；兜底目标**必须**是 `pause` 步骤。此种未预期取值是**判断分歧**，应以 exit 10 fail-open 交回 agent，而不是让运行器猜。
+
+这不改变契约失败的语义：提取器失败、缺失或歧义的 `route_on`、schema 非法、未知步骤类型、不可解析模板引用、非法 route 结构、hook/assert/dispatch 失败，以及 journal/续跑状态不确定，均为 fail-closed（相应退出码 1、2 或 11），不得借 `"*"` 转为 `pause`。
 
 无 `extract` 的步骤用 `next: <step-id>` 单向推进；二者都没有即为终止步骤。
 
@@ -268,10 +269,10 @@ workdir 下的 `journal.jsonl` 是 append-only 执行日志，采用 **started /
 以及对复杂 `regex` 取值器的**启发式提示**（命名组 > 3 或长度 > 100）——
 提示 spec 作者可能在用正则把判断硬编码进 spec。**这是提示，不是阻断。**
 
-## 与 SKILL.md §三 三分判据的对齐
+## 与主文件的运行器边界对齐
 
 | 判据 | 如何满足 |
 |---|---|
 | ① 机制不执行任务本身 | 不写 prompt、不判 verdict、不裁决分歧 |
 | ② 不收窄编排空间 | spec 由 orchestrator 撰写；`pause` 可在任意点交回控制权 |
-| ③ 契约违反 fail-closed，判断分歧 fail-open | 未匹配路由 / hook 断言失败 / 产物缺失 / 续跑不确定 → 停机；需要判断处 → `pause` 交回 agent |
+| ③ 契约违反 fail-closed，判断分歧 fail-open | schema、步骤类型、模板、提取、hook/assert/dispatch 与 journal 契约失败 → 停机；仅提取成功但未命中具名 route 的值 → 必填 `"*"` → `pause` 交回 agent |

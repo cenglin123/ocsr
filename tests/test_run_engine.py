@@ -211,6 +211,100 @@ steps:
             assert gate["route_matched"] == "*"
             assert gate["next"] == "ask"
 
+    def test_yaml_missing_route_key_fails_closed(self):
+        with tempfile.TemporaryDirectory() as t:
+            s = Scene(Path(t), """\
+version: 1
+run: {id: t, workdir: __WD__}
+steps:
+  - id: gate
+    type: hook
+    run: [__PY__, -c, "print('```yaml'); print('other: value'); print('```')"]
+    extract: {verdict: "yaml:verdict"}
+    route: {ok: fin, "*": ask}
+  - {id: ask, type: pause, question: q, options: [fin, abort]}
+  - {id: fin, type: hook, run: [__PY__, -c, "print('fin')"]}
+""")
+            assert s.run() == rs.EXIT_STEP_FAILED
+            gate = s.events("step-completed")[0]
+            assert gate["status"] == "failed"
+            assert "抽取失败" in gate["detail"]
+            assert not (s.wd / rs.PAUSE_REQUEST_NAME).exists()
+
+    def test_yaml_empty_route_value_fails_closed(self):
+        with tempfile.TemporaryDirectory() as t:
+            s = Scene(Path(t), """\
+version: 1
+run: {id: t, workdir: __WD__}
+steps:
+  - id: gate
+    type: hook
+    run: [__PY__, -c, "print('```yaml'); print('verdict:'); print('```')"]
+    extract: {verdict: "yaml:verdict"}
+    route: {ok: fin, "*": ask}
+  - {id: ask, type: pause, question: q, options: [fin, abort]}
+  - {id: fin, type: hook, run: [__PY__, -c, "print('fin')"]}
+""")
+            assert s.run() == rs.EXIT_STEP_FAILED
+            assert s.events("step-completed")[0]["status"] == "failed"
+            assert not (s.wd / rs.PAUSE_REQUEST_NAME).exists()
+
+    def test_only_first_yaml_block_is_eligible_for_extraction(self):
+        with tempfile.TemporaryDirectory() as t:
+            s = Scene(Path(t), """\
+version: 1
+run: {id: t, workdir: __WD__}
+steps:
+  - id: gate
+    type: hook
+    run: [__PY__, -c, "print('```yaml'); print('other: value'); print('```'); print('```yaml'); print('verdict: ok'); print('```')"]
+    extract: {verdict: "yaml:verdict"}
+    route: {ok: fin, "*": ask}
+  - {id: ask, type: pause, question: q, options: [fin, abort]}
+  - {id: fin, type: hook, run: [__PY__, -c, "print('fin')"]}
+""")
+            assert s.run() == rs.EXIT_STEP_FAILED
+            assert s.events("step-completed")[0]["status"] == "failed"
+            assert not (s.wd / rs.PAUSE_REQUEST_NAME).exists()
+
+    def test_regex_no_match_fails_closed(self):
+        with tempfile.TemporaryDirectory() as t:
+            s = Scene(Path(t), """\
+version: 1
+run: {id: t, workdir: __WD__}
+steps:
+  - id: gate
+    type: hook
+    run: [__PY__, -c, "print('no verdict here')"]
+    extract: {verdict: 'regex:verdict=(\\w+)'}
+    route: {ok: fin, "*": ask}
+  - {id: ask, type: pause, question: q, options: [fin, abort]}
+  - {id: fin, type: hook, run: [__PY__, -c, "print('fin')"]}
+""")
+            assert s.run() == rs.EXIT_STEP_FAILED
+            gate = s.events("step-completed")[0]
+            assert gate["status"] == "failed"
+            assert "抽取失败" in gate["detail"]
+            assert not (s.wd / rs.PAUSE_REQUEST_NAME).exists()
+
+    def test_regex_empty_capture_fails_closed(self):
+        with tempfile.TemporaryDirectory() as t:
+            s = Scene(Path(t), """\
+version: 1
+run: {id: t, workdir: __WD__}
+steps:
+  - id: gate
+    type: hook
+    run: [__PY__, -c, "import sys; sys.stdout.write('verdict=')"]
+    extract: {verdict: 'regex:verdict=(.*)'}
+    route: {ok: fin, "*": ask}
+  - {id: ask, type: pause, question: q, options: [fin, abort]}
+  - {id: fin, type: hook, run: [__PY__, -c, "print('fin')"]}
+""")
+            assert s.run() == rs.EXIT_STEP_FAILED
+            assert s.events("step-completed")[0]["status"] == "failed"
+            assert not (s.wd / rs.PAUSE_REQUEST_NAME).exists()
+
     def test_exitcode_extractor(self):
         with tempfile.TemporaryDirectory() as t:
             s = Scene(Path(t), """\
@@ -262,7 +356,7 @@ run: {id: t, workdir: __WD__}
 steps:
   - id: gate
     type: hook
-    run: [__PY__, -c, "print('nothing')"]
+    run: [__PY__, -c, "print('```yaml'); print('verdict: surprise'); print('```')"]
     extract: {verdict: "yaml:verdict"}
     route: {"ok": fin, "*": ask}
   - {id: ask, type: pause, question: 请裁决, options: [fin, abort]}

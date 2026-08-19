@@ -1,6 +1,6 @@
 # 层级指挥模式（orchestrator 无头运行）— 详细参考
 
-> 本文件从 SKILL.md §十 下沉。主文件仅保留触发词与入口指针；本文件承载完整协议：detached 派发、state 文件 schema、monitor 配套、路径 B 续接、commander 裁决点、验收环、调研二分、跨 Phase 接口契约、verify-ownership。机制语义与原 §十 完全一致。
+> 本文件由 [SKILL.md 的层级指挥入口](../SKILL.md) 按需加载。主文件只保留条件入口；本文件承载完整协议：detached 派发、state 文件 schema、monitor 配套、路径 B 续接、commander 裁决点、验收环、调研二分、跨 Phase 接口契约、verify-ownership。
 
 > **层级指挥**：planner（顶层规划模型）探索全貌、写 plan、终验签字；orchestrator（pro 模型）循环控制 + verdict 裁决 + 任务卡；worker（flash 执行档）承接全部写作类交付物。三层是默认形态而非定数——小任务可塌缩（orchestrator 直接带 worker），超大任务可长出第四层。
 > **commander**（操作裁决者）与 planner 是同一角色在层级指挥不同阶段的两个职责面：planner 负责写 plan 与终验；同一角色在中断/预算续接场景下以 commander 身份做操作裁决（换模型、改 brief、终止），不改变层数计数。`refs/hierarchical-command.md` §commander 裁决点操作规程中的"commander"即此含义。
@@ -77,7 +77,7 @@ python scripts/ocsr_dispatch.py monitor --process-name opencode.exe --watch-dir 
 
 ### resume 任务卡骨架
 
-下列（a）–（d）项由 commander 根据 _orchestrator-state.md / _phase-report.md / dispatch-log 填充，纳入 prompt 【边界与禁区】残差（§四）：
+下列（a）–（d）项由 commander 根据 _orchestrator-state.md / _phase-report.md / dispatch-log 填充，纳入 [自足 prompt 的“边界与禁区”](../SKILL.md)：
 
 ```text
 你是 orchestrator（续接模式）。读取 _orchestrator-state.md 和 _phase-report.md。
@@ -104,14 +104,14 @@ python scripts/ocsr_dispatch.py monitor --process-name opencode.exe --watch-dir 
   1. 失败指纹判定：若两轮同模型失败且错误不同 → **brief 缺陷**（任务卡残差不充分）；若错误相同 → **模型能力不足**
   2. 修订 brief：补充缺失路径/禁用清单/术语表后重派
 - **终止**：
-  - 区分两个层面：**每 worker 3 次总尝试（§五 硬停止条件）** vs **orchestrator 级别整体预算（如 converge 的 budget_gate）**
+  - 区分两个层面：**每 worker 3 次总尝试（[默认派发闭环的硬停止条件](../SKILL.md)）** vs **orchestrator 级别整体预算（如 converge 的 budget_gate）**
   - 达到上限 / 预算耗尽 / 方向性设计需用户拍板 → 终止并上报
 
 ### 验收环
 
 orchestrator 各 Phase 完成后、向 planner 汇报前，必须派**非 executor 族** acceptance-reviewer（按 `opencode models --verbose` 的 family 字段，acceptance-reviewer 与当次执行 executor 不同 family 即可），任务是执行确定性验收命令（pytest / CLI / 真实数据源），不是读报告写意见：
 
-- 修复循环由 orchestrator 管理（converge 原生 inner loop 语义）；反复失败直至重试上限、或 verdict=需重新设计时，才升级 planner 介入。acceptance-reviewer 自身按 §五 计为独立 worker（3 次总尝试）；"反复失败"指 orchestrator 管理的修复循环轮次耗尽，不是 reviewer 单次失败
+- 修复循环由 orchestrator 管理（converge 原生 inner loop 语义）；反复失败直至重试上限、或 verdict=需重新设计时，才升级 planner 介入。acceptance-reviewer 自身按 [默认派发闭环](../SKILL.md)计为独立 worker（3 次总尝试）；"反复失败"指 orchestrator 管理的修复循环轮次耗尽，不是 reviewer 单次失败
 - planner 终验 = 证据链核验：复跑核心测试 + 审查 verdict 链 + 机械校验（如 verify-ownership） + 抽查关键产物内容一致性，不是全量复审。verify-ownership 是验收环中「机械校验」的具体工具实例（归属三查），acceptance-reviewer 可直接调用
 
 **设计规则——机制兜底优先**：能用防呆机制机械兜底的问题（退出码、schema、归属校验）由机制兜底，让模型精力聚焦执行；机制兜不住的（幻觉、语义偏差）由独立审计（非族 reviewer）兜底。
