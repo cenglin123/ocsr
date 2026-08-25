@@ -1,3 +1,5 @@
 - insert:
     - id: ocsr-skill
       name: '@ocsr/dsh-ocsr'
+    - id: ocsr-tools
+      name: '@ocsr/dsh-ocsr/tool'

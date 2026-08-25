@@ -4,7 +4,8 @@
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
-    ".": "./lib/index.js"
+    ".": "./lib/index.js",
+    "./tool": "./lib/tool-ocsr.js"
   },
   "files": [
     "lib",
@@ -22,6 +23,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-skill": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
     "@deepseek-ai/cordis": "^4.0.1"
   },
   "dependencies": {
