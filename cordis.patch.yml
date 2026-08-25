@@ -1,0 +1,3 @@
+- insert:
+    - id: ocsr-skill
+      name: '@ocsr/dsh-ocsr'

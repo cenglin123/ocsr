@@ -1,9 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-08-19
+更新时间：2026-08-25
 
 ## 当前状态
 
+- dsh 适配层计划已收敛（可执行），Phase 1 已落地：新增根级 `package.json`（`@ocsr/dsh-ocsr`）、`cordis.patch.yml`（插入 `ocsr-skill` 行）、`lib/index.js`（host 平面 `skills` runtime provider，provider 名 `ocsr`、插件名 `ocsr-skill`）、`refs/dsh-integration.md`（安装/配置/边界/版本锁定）。`dsh plugin --profile <p> add .` 后可由 dsh 技能系统发现 `ocsr` 技能，`resourceBase` 为 `{ kind: 'directory', path: <包根目录> }`。一等派发工具（`ocsr_dispatch`）属 Phase 2。
 - 派发驱动器为默认派发路径：`scripts/ocsr_dispatch.py`（dispatch/run/selftest/telemetry/summary/monitor/verify-ownership/preflight）。
 - **模型白名单**：由用户可编辑的 `config/allowed-models.json` 加载；仓库默认仅 `xiaomi/mimo-v2.5`、`xiaomi/mimo-v2.5-pro`。配置必须是非空、无重复的 qualified ID JSON 数组，错误时命令启动 fail-closed。
 - watcher 失败语义分层：exit=0 期望产物缺失时区分「0 产物」与「命名与 pattern 不符」（`_detect_name_mismatch`）。
