@@ -3,3 +3,7 @@
       name: '@ocsr/dsh-ocsr'
     - id: ocsr-tools
       name: '@ocsr/dsh-ocsr/tool'
+    - id: ocsr-settings
+      name: '@ocsr/dsh-ocsr/settings'
+    - id: ocsr-projection
+      name: '@ocsr/dsh-ocsr/projection'

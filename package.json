@@ -5,7 +5,9 @@
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./tool": "./lib/tool-ocsr.js"
+    "./tool": "./lib/tool-ocsr.js",
+    "./settings": "./lib/settings-ocsr.js",
+    "./projection": "./lib/projection-ocsr.js"
   },
   "files": [
     "lib",
@@ -24,7 +26,21 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-skill": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-jobs": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-jobs-local": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tool-jobs": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-session-projection": "^0.1.1-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-jobs": { "optional": true },
+    "@deepseek-ai/dsh-jobs-local": { "optional": true },
+    "@deepseek-ai/dsh-tool-jobs": { "optional": true },
+    "@deepseek-ai/dsh-settings": { "optional": true },
+    "@deepseek-ai/dsh-session": { "optional": true },
+    "@deepseek-ai/dsh-session-projection": { "optional": true }
   },
   "dependencies": {
     "yaml": "^2.4.2"

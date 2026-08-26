@@ -25,10 +25,10 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 - 本 Phase 1 以 `@deepseek-ai/dsh` `0.1.1-rc.2` 全局安装 checkout 实测验证（路径 `C:\\Users\\Administrator\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh`）。宿主 API（`skills` registry、`registerProvider(control)`、candidate/definition 契约）以该版本为准；升级宿主时先复核这些接口再保留本适配。
 - `package.json` peerDependencies 锁 `@deepseek-ai/dsh-skill ^0.1.1-rc.2`、`@deepseek-ai/cordis ^4.0.1`。
 
-## Phase 2（已实现）/ Phase 3（待办）
+## Phase 2（已实现）/ Phase 3（已实现，含如下新增）
 
 - Phase 2（一等工具，已实现）：`lib/tool-ocsr.js` 用 `defineTool` 注册一等工具 `ocsr_dispatch`；`inject=['tools']`、`apply(ctx)` 内 `ctx.tools.register(...)`，工具面向模型，位于 host `tools` registry。它把 schema 参数映射为 `python scripts/ocsr_dispatch.py dispatch ...`（`scripts/ocsr_dispatch.py` 是编排的唯一实现，本工具只是薄壳包装；`cordis.patch.yml` 已追加 `ocsr-tools` 行，`package.json` 暴露 `./tool` 子路径）。
-- Phase 3（深度原生，仍待办）：通过 `ctx.jobs` 把长派发提升为 dsh 可跟踪 background job、把 worker 状态投影到 session；依赖 dsh jobs API，须先确认接口再动。
+- Phase 3（已实现）：`ocsr_dispatch` 支持 `background:true`（经 `ctx.jobs` 成为可被 `job_output`/`job_kill` 跟踪的后台 job，`jobs.start` 生产者契约，run 返回 {cancel,done,readOutput}，jobs/settings 经 `ctx.get` 判空）；`dsh-ocsr` settings namespace 作为**只收窄**的模型白名单交集门（未配置回退 driver 的 `config/allowed-models.json`）；best-effort/in-memory-only 的 `ocsr.jobs` session 投影（仅观察 job 生命周期，经 projection registry `drive(session,event)` 折叠；持久化投影缓存存在时默认跳过注册）。
 
 ## 验证
 
