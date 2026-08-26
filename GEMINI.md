@@ -20,6 +20,7 @@ OCSR（OpenCode Subagents Run）是以 headless `opencode run` 驱动异构、�
 - 不得手工伪造 reviewer、receipt、manifest 或归档成功状态。
 - 不得覆盖或删除 `.converge/` 证据；归档失败必须保留 active/staging 现场并记录真实错误。
 - 文本文件统一 UTF-8 无 BOM、LF；不要把终端乱码直接判定为文件损坏。
+- dsh 适配层只做映射/包装：不得复制 OCSR 核心语义或技能正文（SKILL.md + scripts/ocsr_dispatch.py 仍是唯一事实源）。
 
 ## 修改与验证
 

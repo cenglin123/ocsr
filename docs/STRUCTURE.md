@@ -9,6 +9,7 @@
 | 本地运行和验证 | [deployment.md](deployment.md) | 执行命令、排查环境时 |
 | 已知陷阱与失败模式 | [pitfalls.md](pitfalls.md)、[../refs/](../refs/) | 派发、审查或故障处理前 |
 | 层级指挥 / 派发模式 / converge 对接 / 模型默认池 | [../refs/](../refs/)（hierarchical-command、dispatch-patterns、converge-integration、model-defaults 等） | SKILL.md 主文件指向具体场景时 |
+| dsh 插件适配层边界与版本锁定 | [../refs/dsh-integration.md](../refs/dsh-integration.md) | 安装/配置/演进 dsh 集成时 |
 | 文档审计 | [audit-checklist.md](audit-checklist.md) | 文档体系变更或定期审计时 |
 | 已完成变更 | [CHANGELOG.md](CHANGELOG.md) | 需要近期历史时；优先用脚本读取 |
 | 开发沿革（脱敏摘要） | [../DEVELOPMENT.md](../DEVELOPMENT.md) | 需要了解演进背景时 |
@@ -17,3 +18,5 @@
 | 执行计划 | plans/（按需创建） | 分阶段、跨会话或协作任务时 |
 
 `.converge/` 是流程证据区（本地运行产物，gitignored 不入库），不是日常文档入口。
+
+> dsh 适配层（`package.json`、`cordis.patch.yml`、`lib/index.js`）只做映射/包装，不得复制 OCSR 核心语义或技能正文；入口见 [../refs/dsh-integration.md](../refs/dsh-integration.md)。

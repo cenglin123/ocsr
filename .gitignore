@@ -6,6 +6,12 @@ htmlcov/
 .venv/
 venv/
 
+# Node/npm/pnpm artifacts (dsh plugin bundle).
+node_modules/
+.pnpm-store/
+package-lock.json
+pnpm-lock.yaml
+
 # Local agent/model runtime evidence. It may contain prompts, raw outputs,
 # partial archives, or machine-specific receipts; publish summarized plans instead.
 .converge/
