@@ -2,7 +2,7 @@
 
 > 本表由 [SKILL.md 的模型选择入口](../SKILL.md) 按需加载（数据层，随模型换代更新，对标 converge refs/model-tiers.md）。主文件保留选模型规则、遥测与翻转门槛。
 >
-> OCSR 的可用模型由仓库根目录的 [`config/allowed-models.json`](../config/allowed-models.json) 唯一决定。默认值是 `xiaomi/mimo-v2.5` 与 `xiaomi/mimo-v2.5-pro`；用户可修改该非空、无重复的 JSON 字符串数组，下一次命令启动时加载。未列出的模型不可选。
+> OCSR 的可用模型由仓库根目录的 [`config/allowed-models.json`](../config/allowed-models.json) 唯一决定。默认值是 `xiaomi/mimo-v2.5` 与 `xiaomi/mimo-v2.5-pro`——仅是作者本机模型池的样例，你的机器安装的 opencode 未必提供这些条目；首次使用先运行 `opencode models --verbose` 按本地模型池重配该 JSON，再决定模型。用户可修改该非空、无重复的 JSON 字符串数组，下一次命令启动时加载。未列出的模型不可选。
 
 下表仅描述**仓库默认配置**下的角色分工；用户替换白名单后，必须选择当前配置中存在且已通过 preflight 的模型，不能沿用表中的已移除 ID。
 
