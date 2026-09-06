@@ -19,7 +19,7 @@ OCSR（OpenCode Subagents Run）以 headless `opencode run` 派发可选模型�
 
 ### 1. 固定模型、调用上限与路径
 
-可用 qualified ID 由用户可编辑的 [`config/allowed-models.json`](config/allowed-models.json) 唯一决定；仓库默认仅含 `xiaomi/mimo-v2.5` 与 `xiaomi/mimo-v2.5-pro`。修改该 JSON 后重新启动命令即可加载；它必须是非空、无重复、无首尾空白的 `provider/model` 字符串数组，格式错误会 fail-closed。`selftest` 未传 `--model` 时使用配置首项。首次使用先运行 `opencode models --verbose`，从模型块标题原样复制 qualified ID；禁止凭 `id`、`providerID`、`name` 或裸名拼接 `-m`。再用 `python scripts/ocsr_dispatch.py preflight --model <qualified-id>` 验证选定模型可用性（会消耗真实模型调用）。模型角色与成本资料见 [`refs/model-defaults.md`](refs/model-defaults.md)。价格元数据（包括 `cost=0`）只是启发式风险信号，元数据可能缺失，不能单独证明模型能力或免费。
+可用 qualified ID 由用户可编辑的 [`config/allowed-models.json`](config/allowed-models.json) 唯一决定；仓库默认仅含 `xiaomi/mimo-v2.5` 与 `xiaomi/mimo-v2.5-pro`。修改该 JSON 后重新启动命令即可加载；它必须是非空、无重复、无首尾空白的 `provider/model` 字符串数组，格式错误会 fail-closed。`selftest` 未传 `--model` 时使用配置首项。仓库默认白名单来自作者本机模型池，其他机器安装的 opencode 未必提供相同模型——每台机器首次使用前（以及换机、通道异常归因后）先运行 `opencode models --verbose` 看本地实际有哪些模型，从模型块标题原样复制 qualified ID 更新 [`config/allowed-models.json`](config/allowed-models.json) 再决定用哪个；禁止凭 `id`、`providerID`、`name` 或裸名拼接 `-m`。派发前用 `python scripts/ocsr_dispatch.py preflight --model <qualified-id>` 验证选定模型可用性（会消耗真实模型调用）。模型角色与成本资料见 [`refs/model-defaults.md`](refs/model-defaults.md)。价格元数据（包括 `cost=0`）只是启发式风险信号，元数据可能缺失，不能单独证明模型能力或免费。
 
 派发前向用户披露模型与调用总上限；未经新鲜授权不突破该上限。每个 worker 最多 **3 次总尝试**。有副作用但不能证明幂等性的任务，**禁止自动重派**。
 
