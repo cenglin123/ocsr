@@ -79,7 +79,7 @@ python scripts/ocsr_dispatch.py dispatch --worker "<prompt>|<model>|<label>" --o
 | 层级指挥 | [`refs/hierarchical-command.md`](refs/hierarchical-command.md) | 归属、状态、看护和独立验收 |
 | 发布 executor | [`refs/release-executor.md`](refs/release-executor.md) | 输入合同、manifest 与保护默认 |
 
-对抗评审的最小规范：只给完成审查所需的输入；把被审产物与 reviewer 输出隔离；要求结构化 `reads:`；审计发现提前获得答案或作弊性读取时，verdict 默认作废并以新会话重评。具体布局、禁读清单、审计裁定及例外都在 `refs/failure-modes.md`。
+对抗评审的最小规范：只给完成审查所需的输入；把被审产物与 reviewer 输出隔离；要求结构化 `reads:`；reviewer 以只读命令做运行时验证佐证时，prompt 须钉死禁止写入与修复、报告列明执行的命令与退出码；审计发现提前获得答案或作弊性读取时，verdict 默认作废并以新会话重评。具体布局、禁读清单、命令执行合同、审计裁定及例外都在 `refs/failure-modes.md`。
 
 `run --spec` 只搬运确定性步骤，不写 prompt、不判 verdict。其 schema、步骤类型、模板、journal 或提取契约失败均 fail-closed；只有已成功提取的值未命中具名 route，才会经必填 `"*"` pause 交回 agent。
 
