@@ -20,7 +20,7 @@
 | harness 前台超时 < 单轮耗时 | 判断密集角色在规划阶段估算单轮 20–30 min（含 prompt 构建、排队长尾、收敛往返），多数 harness 前台上限 ≤10 min | 改用 [脱管派发模式](dispatch-patterns.md)（launcher + Start-Process + 双监视观察器） |
 | 模型端静默停滞 | 进程存活 + 日志 0 字节 + 无子进程 + 超过看门狗阈值 | [失败看护与切换](dispatch-patterns.md)中的看门狗硬阈值到期即终止，禁止无阈值人工轮询；记录后按失败切换阶梯重派 |
 | **Launcher 路径转义** | 反斜杠路径经多层转义（harness JSON→heredoc→Python f-string→pwsh）可能被误解析（`\r`→回车等）；症状为 launcher 秒退无日志、无产物、无错误文件 | 驱动器 (`scripts/ocsr_dispatch.py`) 已内置路径生成，该陷阱仅手写模式需注意。手写模式下一律使用正斜杠路径（`$PSScriptRoot/run.log` 而非 `$PSScriptRoot\run.log`）；launcher 加启动 marker 与 try/catch 错误捕获 |
-| **并发 DB 锁** | 多个 opencode 实例**同秒**启动时，本机会话 SQLite DB（`~/.config/opencode/sessions.db` 或其等价物）被并发写入撞锁，触发 `database is locked`；实例秒退 exit=1、log <100B、无产物 | 多 worker 启动加**错峰间隔** ≥5s（调用方派发脚本应有此能力）；失败日志含 "database is locked" 时延迟 30s 自动重试 1 次（通道例外，不计模型重试名额）；selftest 会检测当前 opencode 版本的并发容限 |
+| **并发 DB 锁** | 多个 opencode 实例**同秒**启动时，本机会话 SQLite DB（`~/.config/opencode/sessions.db` 或其等价物）被并发写入撞锁，触发 `database is locked`；实例秒退 exit=1、log <100B、无产物 | 多 worker 启动加**错峰间隔** ≥5s（调用方派发脚本应有此能力）；失败日志含 "database is locked" 时 watcher 记录 `recovery_required` 并停止，不自行重派；新尝试必须由上层重新 reserve，完成后 settle，且计入同一调用预算与尝试上限；selftest 会检测当前 opencode 版本的并发容限 |
 | **越界写入覆盖既有产物** | `--output-pattern` 只约束看门狗等待哪个文件，**不约束子代理往哪写**。prompt 输出路径含占位符时，子代理自行发明文件名，可覆盖同目录他人产物；指纹 = exit=0 + 期望产物缺失 + 同目录既有文件 mtime/size 变化 | prompt【输出】节写死唯一绝对路径且说明覆盖后果；派发前备份 `--output-dir`；调用方驱动器派发前后快照比对，检出即报错退出（详见 refs/failure-modes.md §越界写入） |
 | **嵌套派发失账** | 下层 orchestrator 自行发起的 `opencode run` 不经上层的预算 gate，账本只记外层——治理看到的开销可能只有真实值的一小部分 | 当 OCSR 作为 converge 的 Spawn 后端时，每个 `opencode run` 调用应由对接层驱动器向 converge 的 active 目录自动追加派发账本记录，无需调用方逐次传参；驱动器应提供汇总命令（含嵌套派发）供上层流程审计 |
 

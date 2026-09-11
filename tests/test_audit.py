@@ -15,7 +15,10 @@ SPEC.loader.exec_module(audit)
 class StructureLinksTest(unittest.TestCase):
     def test_structure_links_are_relative_to_structure_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # resolve(): TemporaryDirectory may yield an 8.3 short path on
+            # Windows, while _resolve() canonicalizes paths, so relative_to()
+            # against the raw root would spuriously fail.
+            root = Path(tmp).resolve()
             docs = root / "docs"
             (docs / "problems" / "bugfix").mkdir(parents=True)
             (docs / "CURRENT.md").write_text("# Current\n", encoding="utf-8")
@@ -51,7 +54,7 @@ class DriftWordBoundaryTest(unittest.TestCase):
         # Regression: docs saying "Windows PowerShell" must not report
         # WebSocket drift merely because "windows" contains "ws".
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             docs = root / "docs"
             docs.mkdir()
             (docs / "overview.md").write_text(

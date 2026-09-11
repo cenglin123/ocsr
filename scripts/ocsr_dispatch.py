@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -46,8 +47,9 @@ if sys.platform == "win32":
 # ─── 常量 ────────────────────────────────────────────────────────────
 DEFAULT_STAGGER = 5       # 秒，多 worker 错峰间隔
 DEFAULT_TIMEOUT = 15      # 分钟，单个 worker 看门狗阈值
+DEFAULT_MAX_RENEWALS = 1  # 检查期限后的有限续期次数；总期限仍不可变
+MAX_ATTEMPTS = 3          # 与 SKILL.md 的每 worker 总尝试上限一致
 DISPATCH_LOG = Path.home() / ".ocsr" / "dispatch-log.jsonl"
-RETRY_DELAY_DB_LOCK = 30  # 秒，database is locked 后延迟重试
 CONVERGE_LEDGER_NAME = "ocsr-dispatch-ledger.jsonl"  # 入库账本（随收敛证据一起提交）
 # dispatch 退出码契约（单一事实源见 refs/dispatch-patterns.md §退出码契约）
 #   0 = 全部 worker 落盘
@@ -130,6 +132,13 @@ TELEMETRY_FIELDS: dict[str, str] = {
     "timeout_policy_resolved": "optional",
     "forbid_paths": "optional",
     "read_audit": "optional",
+    "worker_state": "optional",
+    "inspection_deadline": "optional",
+    "total_deadline": "optional",
+    "renewal_count": "optional",
+    "session_status": "optional",
+    "old_process_stop_verified": "optional",
+    "resume_eligible": "optional",
 }
 
 # 字节→token 近似系数（英文约 4 bytes/token，中文约 2-3 bytes/token）
@@ -233,19 +242,59 @@ def _resolve_timeout_policy(policy: str, role: str) -> str:
 
 # ─── 工具 ────────────────────────────────────────────────────────────
 def _pwsh_code(text: str) -> str:
-    """生成 PowerShell launcher 脚本内容，含模型调用防护。"""
+    """生成 launcher，流式保存 JSON 并绑定唯一 sessionID。
+
+    ``session-binding.json`` 只在同一次 ``opencode run --format json`` 的顶层
+    ``sessionID`` 唯一时存在。缺失或歧义只禁止后续 resume，不改变本次
+    ``opencode`` 的真实退出码；watcher 不会查询 SQLite 或猜测目录中的“最新 session”。
+    """
+    command_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return textwrap.dedent(f"""\
         if ($env:OCSR_DISABLE_MODEL_CALLS -eq '1') {{
             "launcher blocked: OCSR_DISABLE_MODEL_CALLS=1" | Set-Content "$PSScriptRoot/error.log"
             exit 1
         }}
+        $selfProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+        $identity = [ordered]@{{
+            pid = $PID
+            creation_time = ([datetime]$selfProcess.CreationDate).ToUniversalTime().Ticks.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            command_fingerprint = "{command_fingerprint}"
+        }}
+        $identity | ConvertTo-Json -Compress | Set-Content "$PSScriptRoot/process-identity.json" -Encoding UTF8
         "pwsh started $(Get-Date -Format o)" | Set-Content "$PSScriptRoot/start.marker"
         try {{
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
-          opencode run $prompt {text} *> "$PSScriptRoot/run.log"
-          "exit=$LASTEXITCODE" | Add-Content "$PSScriptRoot/start.marker"
+          $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
+          & opencode run $prompt --format json {text} 2>&1 | ForEach-Object {{
+            $line = [string]$_
+            $line | Add-Content "$PSScriptRoot/run.log" -Encoding UTF8
+            try {{
+              $event = $line | ConvertFrom-Json -ErrorAction Stop
+              $sessionProperty = $event.PSObject.Properties['sessionID']
+              if ($null -ne $sessionProperty -and $sessionProperty.Value -is [string] -and $sessionProperty.Value.Trim()) {{
+                [void]$sessionIDs.Add($sessionProperty.Value.Trim())
+                if ($sessionIDs.Count -eq 1) {{
+                  $binding = [ordered]@{{
+                    session_id = @($sessionIDs)[0]
+                    pid = $identity.pid
+                    creation_time = $identity.creation_time
+                    command_fingerprint = $identity.command_fingerprint
+                  }}
+                  $binding | ConvertTo-Json -Compress | Set-Content "$PSScriptRoot/session-binding.json" -Encoding UTF8
+                }} elseif ($sessionIDs.Count -gt 1) {{
+                  Remove-Item "$PSScriptRoot/session-binding.json" -Force -ErrorAction SilentlyContinue
+                }}
+              }}
+            }} catch {{ }}
+          }}
+          $opencodeExit = $LASTEXITCODE
+          if ($sessionIDs.Count -ne 1) {{
+            Remove-Item "$PSScriptRoot/session-binding.json" -Force -ErrorAction SilentlyContinue
+          }}
+          "exit=$opencodeExit" | Add-Content "$PSScriptRoot/start.marker"
         }} catch {{
           $_ | Out-File "$PSScriptRoot/error.log"
+          "exit=1" | Add-Content "$PSScriptRoot/start.marker"
         }}
     """)
 
@@ -260,9 +309,7 @@ PID_FILE_NAME = "pid.txt"
 def _launch_command(wd: Path) -> str:
     """生成拉起 worker 的 PowerShell 命令：`-PassThru` 捕获 PID 并写入 <wd>/pid.txt。
 
-    **两个拉起调用点（初始派发、DB 锁重派）必须共用本函数。**
-    重派若不刷新 pid.txt，看门狗到期时会对已死的旧 PID 执行 taskkill，
-    而重派出的新 worker 继续存活消耗模型调用——正是本函数要消灭的失效模式。
+    看门狗只接受这里捕获的真实 PID；watcher 自身不负责恢复或再次拉起 worker。
     """
     p = wd.as_posix()
     return (
@@ -281,6 +328,340 @@ def _read_pid(wd: Path) -> int | None:
         return None
     m = re.search(r"\d+", raw)
     return int(m.group(0)) if m else None
+
+
+PROCESS_IDENTITY_FILE = "process-identity.json"
+SESSION_BINDING_FILE = "session-binding.json"
+WORKER_STATE_FILE = "worker-state.json"
+RESUME_MATERIAL_FILE = "resume-material.json"
+
+
+def _read_json_object(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _extract_session_ids(log_file: Path) -> tuple[set[str], int, dict | None]:
+    """只解析 JSONL 顶层 ``sessionID``，同时返回有效事件数和最后事件。"""
+    ids: set[str] = set()
+    event_count = 0
+    last_event: dict | None = None
+    try:
+        lines = log_file.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return ids, event_count, last_event
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_count += 1
+        last_event = event
+        candidate = event.get("sessionID")
+        if isinstance(candidate, str) and candidate.strip():
+            ids.add(candidate.strip())
+    return ids, event_count, last_event
+
+
+def _read_session_binding(wd: Path) -> tuple[str, str]:
+    """返回 ``(status, session_id)``；任何歧义或身份不一致都 fail-closed。"""
+    ids, _count, _last = _extract_session_ids(wd / "run.log")
+    if len(ids) > 1:
+        return "ambiguous", ""
+    if not ids:
+        return "missing", ""
+    binding = _read_json_object(wd / SESSION_BINDING_FILE)
+    identity = _read_json_object(wd / PROCESS_IDENTITY_FILE)
+    pid = _read_pid(wd)
+    if binding is None or identity is None or pid is None:
+        return "unbound", ""
+    sid = next(iter(ids))
+    identity_creation_time = str(identity.get("creation_time") or "").strip()
+    identity_fingerprint = str(identity.get("command_fingerprint") or "").strip()
+    if (
+        binding.get("session_id") != sid
+        or binding.get("pid") != pid
+        or identity.get("pid") != pid
+        or not identity_creation_time
+        or not identity_fingerprint
+        or binding.get("creation_time") != identity_creation_time
+        or binding.get("command_fingerprint") != identity_fingerprint
+    ):
+        return "identity_mismatch", ""
+    return "available", sid
+
+
+def _query_process_table() -> dict[int, dict]:
+    """读取 Windows 进程 PID/父 PID/创建身份；失败返回空表并由调用方 fail-closed。"""
+    command = (
+        "Get-CimInstance Win32_Process | ForEach-Object { "
+        "[ordered]@{ ProcessId = [int]$_.ProcessId; "
+        "ParentProcessId = [int]$_.ParentProcessId; "
+        "CreationTimeUtcTicks = ([datetime]$_.CreationDate).ToUniversalTime().Ticks."
+        "ToString([System.Globalization.CultureInfo]::InvariantCulture) } "
+        "} | ConvertTo-Json -Compress"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return {}
+    if proc is None or getattr(proc, "returncode", 1) != 0 or not (getattr(proc, "stdout", "") or "").strip():
+        return {}
+    try:
+        raw = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {}
+    rows = raw if isinstance(raw, list) else [raw]
+    table: dict[int, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            process_id = int(row["ProcessId"])
+            parent_id = int(row.get("ParentProcessId", 0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        table[process_id] = {
+            "parent_pid": parent_id,
+            "creation_time": str(row.get("CreationTimeUtcTicks") or "").strip(),
+        }
+    return table
+
+
+def _descendant_pids(root_pid: int, table: dict[int, dict]) -> set[int]:
+    descendants: set[int] = set()
+    frontier = {root_pid}
+    while frontier:
+        children = {
+            pid for pid, info in table.items()
+            if pid not in descendants and int(info.get("parent_pid", 0)) in frontier
+        }
+        descendants.update(children)
+        frontier = children
+    descendants.discard(root_pid)
+    return descendants
+
+
+def _write_worker_state(wd: Path, state: dict) -> None:
+    """原子写入可审计状态，并禁止改写已持久化的总期限。"""
+    path = wd / WORKER_STATE_FILE
+    previous = _read_json_object(path)
+    if previous is not None and previous.get("total_deadline") != state.get("total_deadline"):
+        raise RuntimeError("worker total_deadline is immutable")
+    tmp = wd / f"{WORKER_STATE_FILE}.tmp"
+    _write_utf8(tmp, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def _capture_worker_snapshot(
+    p: dict,
+    now: float,
+    snapshot_before: dict[str, tuple[int, int]] | None,
+) -> dict:
+    wd: Path = p["work_dir"]
+    output: Path = p["output"]
+    ids, event_count, last_event = _extract_session_ids(wd / "run.log")
+    latest_event_timestamp, latest_tool, latest_subagent = _event_runtime_status(wd / "run.log")
+    session_status, session_id = _read_session_binding(wd)
+    table = _query_process_table()
+    pid = _read_pid(wd)
+    identity = _read_json_object(wd / PROCESS_IDENTITY_FILE) or {}
+    descendants = sorted(_descendant_pids(pid, table)) if pid is not None and table else []
+    root = table.get(pid, {}) if pid is not None else {}
+    identity_pid = identity.get("pid")
+    identity_creation_time = str(identity.get("creation_time") or "").strip()
+    command_fingerprint = str(identity.get("command_fingerprint") or "").strip()
+    identity_valid = (
+        pid is not None
+        and isinstance(identity_pid, int)
+        and not isinstance(identity_pid, bool)
+        and identity_pid == pid
+        and bool(identity_creation_time)
+        and bool(command_fingerprint)
+    )
+    if pid is None or not table or not identity_valid:
+        process_status = "unknown"
+    elif pid not in table:
+        process_status = "stopped"
+    elif not str(root.get("creation_time") or "").strip():
+        process_status = "unknown"
+    elif root.get("creation_time") != identity_creation_time:
+        process_status = "pid_reused"
+    else:
+        process_status = "running"
+    artifact_seen, artifact_meta = _check_output_landed(output, snapshot_before)
+    latest_change_ns = 0
+    for candidate in (output, wd / SESSION_BINDING_FILE, wd / PROCESS_IDENTITY_FILE):
+        try:
+            latest_change_ns = max(latest_change_ns, candidate.stat().st_mtime_ns)
+        except OSError:
+            pass
+    last_kind = ""
+    if last_event:
+        for key in ("type", "event", "status"):
+            if last_event.get(key) is not None:
+                last_kind = str(last_event[key])
+                break
+    return {
+        "captured_at": now,
+        "pid": pid,
+        "process_creation_time": identity_creation_time,
+        "command_fingerprint": command_fingerprint,
+        "process_tree_status": process_status,
+        "descendant_pids": descendants,
+        "session_status": session_status,
+        "session_id": session_id,
+        "session_candidates": len(ids),
+        "json_event_count": event_count,
+        "last_json_event": last_kind,
+        "latest_json_event_timestamp": latest_event_timestamp,
+        "tool_status": latest_tool,
+        "subagent_status": latest_subagent,
+        "latest_file_change_ns": latest_change_ns,
+        "artifact_state": "artifact_seen" if artifact_seen else "missing",
+        "artifact_meta": artifact_meta,
+    }
+
+
+def _event_timestamp(event: dict) -> object | None:
+    """提取 JSON 事件自身时间；不以日志 mtime 冒充运行时事件时间。"""
+    for source in (event, event.get("part")):
+        if not isinstance(source, dict):
+            continue
+        for key in ("timestamp", "createdAt", "created_at"):
+            value = source.get(key)
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                return value
+        state = source.get("state")
+        if isinstance(state, dict):
+            timing = state.get("time")
+            if isinstance(timing, dict):
+                for key in ("end", "start"):
+                    value = timing.get(key)
+                    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                        return value
+    return None
+
+
+def _event_runtime_status(log_file: Path) -> tuple[object | None, dict, dict]:
+    """返回最近事件时间、最近工具状态和最近子代理工具状态。"""
+    latest_timestamp: object | None = None
+    latest_tool: dict = {"status": "not_observed"}
+    latest_subagent: dict = {"status": "not_observed"}
+    try:
+        lines = log_file.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return latest_timestamp, latest_tool, latest_subagent
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        timestamp = _event_timestamp(event)
+        if timestamp is not None:
+            latest_timestamp = timestamp
+        part = event.get("part") if isinstance(event.get("part"), dict) else event
+        event_type = str(part.get("type") or event.get("type") or "").lower().replace("-", "_")
+        tool_name = part.get("tool") or event.get("tool")
+        if event_type not in {"tool", "tool_use", "tool_update"} and not tool_name:
+            continue
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        status = state.get("status") or part.get("status") or event.get("status") or "unknown"
+        observation = {
+            "tool": str(tool_name or "unknown"),
+            "status": str(status),
+            "call_id": str(part.get("callID") or part.get("call_id") or ""),
+        }
+        latest_tool = observation
+        normalized_tool = observation["tool"].lower().replace("-", "_")
+        if normalized_tool in {"task", "agent", "subagent", "sub_agent"} or "subagent" in normalized_tool:
+            latest_subagent = dict(observation)
+    return latest_timestamp, latest_tool, latest_subagent
+
+
+def _snapshot_progress_baseline(snapshot: dict) -> dict:
+    """只持久化续期裁决需要的基线字段，供检查记录审计。"""
+    return {
+        "captured_at": snapshot.get("captured_at"),
+        "json_event_count": snapshot.get("json_event_count", 0),
+        "latest_json_event_timestamp": snapshot.get("latest_json_event_timestamp"),
+        "tool_status": snapshot.get("tool_status", {"status": "not_observed"}),
+        "subagent_status": snapshot.get("subagent_status", {"status": "not_observed"}),
+        "latest_file_change_ns": snapshot.get("latest_file_change_ns", 0),
+        "artifact_state": snapshot.get("artifact_state", "missing"),
+    }
+
+
+def _has_auditable_progress(previous: dict, current: dict) -> bool:
+    """仅在进程身份可验证且仍运行时认可结构化进展。"""
+    if current.get("process_tree_status") != "running":
+        return False
+    return (
+        int(current.get("json_event_count", 0)) > int(previous.get("json_event_count", 0))
+        or current.get("artifact_state") == "artifact_seen"
+        and previous.get("artifact_state") != "artifact_seen"
+        or int(current.get("latest_file_change_ns", 0))
+        > int(previous.get("latest_file_change_ns", 0))
+    )
+
+
+def _write_resume_material(
+    p: dict,
+    *,
+    old_process_stop_verified: bool,
+    recovery_safe: bool,
+    attempt_index: int,
+    converge_invocation_id: str,
+) -> bool:
+    """生成上层续接材料，不执行模型调用；返回是否具备续接资格。"""
+    wd: Path = p["work_dir"]
+    session_status, session_id = _read_session_binding(wd)
+    eligible = (
+        old_process_stop_verified
+        and recovery_safe
+        and attempt_index < MAX_ATTEMPTS
+        and session_status == "available"
+    )
+    material = {
+        "schema": "ocsr-resume-material-v1",
+        "resume_eligible": eligible,
+        "reason": "eligible" if eligible else (
+            "old_process_stop_unverified" if not old_process_stop_verified else
+            "side_effect_safety_unproven" if not recovery_safe else
+            "attempt_limit_reached" if attempt_index >= MAX_ATTEMPTS else
+            f"session_{session_status}"
+        ),
+        "session_status": session_status,
+        "session_id": session_id if eligible else "",
+        "old_process_stop_verified": old_process_stop_verified,
+        "requires_new_reservation": True,
+        "requires_settle": True,
+        "attempt_index": attempt_index,
+        "next_attempt_index": attempt_index + 1 if eligible else None,
+        "converge_invocation_id": converge_invocation_id,
+        "execution_dir": str(p.get("execution_dir") or Path.cwd()),
+        "expected_output": str(p["output"]),
+        "resume_argv": (
+            [
+                "opencode", "run", "<RESUME_PROMPT>", "--format", "json",
+                "--session", session_id, "-m", p["model"],
+                "--dir", str(p.get("execution_dir") or Path.cwd()),
+            ] if eligible else []
+        ),
+    }
+    _write_utf8(wd / RESUME_MATERIAL_FILE,
+                json.dumps(material, ensure_ascii=False, indent=2) + "\n")
+    return eligible
 
 
 def _parse_frontmatter(path: Path) -> dict | None:
@@ -456,6 +837,13 @@ def _append_telemetry(
     timeout_policy_resolved: str = "",
     forbid_paths: int = 0,
     read_audit: str = "",
+    worker_state: str = "",
+    inspection_deadline: float | None = None,
+    total_deadline: float | None = None,
+    renewal_count: int | None = None,
+    session_status: str = "",
+    old_process_stop_verified: bool | None = None,
+    resume_eligible: bool | None = None,
 ) -> None:
     now_ts = datetime.datetime.now().astimezone().isoformat()
     row = {
@@ -491,6 +879,20 @@ def _append_telemetry(
         row["forbid_paths"] = forbid_paths
     if read_audit:
         row["read_audit"] = read_audit
+    if worker_state:
+        row["worker_state"] = worker_state
+    if inspection_deadline is not None:
+        row["inspection_deadline"] = inspection_deadline
+    if total_deadline is not None:
+        row["total_deadline"] = total_deadline
+    if renewal_count is not None:
+        row["renewal_count"] = renewal_count
+    if session_status:
+        row["session_status"] = session_status
+    if old_process_stop_verified is not None:
+        row["old_process_stop_verified"] = old_process_stop_verified
+    if resume_eligible is not None:
+        row["resume_eligible"] = resume_eligible
     DISPATCH_LOG.parent.mkdir(parents=True, exist_ok=True)
     with DISPATCH_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -735,6 +1137,11 @@ def _dispatch_batch(
     scope: str = "",
     blocking_chain: list[str] | None = None,
     converge_invocation_id: str = "",
+    total_timeout_min: int | None = None,
+    renewal_minutes: int | None = None,
+    max_renewals: int = DEFAULT_MAX_RENEWALS,
+    recovery_safe: bool = False,
+    attempt_index: int = 1,
 ) -> int:
     """派发内核：**已解析完毕**的 worker 批次 → 退出码。
 
@@ -762,6 +1169,17 @@ def _dispatch_batch(
     _check_model_calls_disabled()
     forbid_paths = forbid_paths or []
     blocking_chain = blocking_chain or []
+    if timeout_min <= 0 or max_renewals < 0 or attempt_index not in range(1, MAX_ATTEMPTS + 1):
+        print("❌ timeout/max-renewals/attempt-index 参数无效", file=sys.stderr)
+        return 1
+    renewal_minutes = timeout_min if renewal_minutes is None else renewal_minutes
+    total_timeout_min = (
+        timeout_min * (max_renewals + 1)
+        if total_timeout_min is None else total_timeout_min
+    )
+    if renewal_minutes <= 0 or total_timeout_min < timeout_min:
+        print("❌ renewal-minutes 必须 >0，total-timeout 必须 >= timeout", file=sys.stderr)
+        return 1
 
     if not workers:
         print("❌ _dispatch_batch: worker 列表为空", file=sys.stderr)
@@ -861,6 +1279,7 @@ def _dispatch_batch(
         (wd / "start.marker").write_text(
             f"pwsh started {datetime.datetime.now().astimezone().isoformat()}\n", encoding="utf-8")
         parsed[i]["work_dir"] = wd
+        parsed[i]["execution_dir"] = Path.cwd()
         launched_row: dict[str, object] = {
             "event": "launched",
             "batch_id": batch_id,
@@ -889,7 +1308,12 @@ def _dispatch_batch(
                          timeout_policy=resolved_policy,
                          timeout_policy_requested=requested_policy,
                          converge_invocation_id=converge_invocation_id,
-                         forbid_paths=forbid_paths)
+                         forbid_paths=forbid_paths,
+                         total_timeout_min=total_timeout_min,
+                         renewal_minutes=renewal_minutes,
+                         max_renewals=max_renewals,
+                         recovery_safe=recovery_safe,
+                         attempt_index=attempt_index)
         if _collision_report(output_dir, snapshot_before, expected_names, ledger):
             return EXIT_PATH_COLLISION
         return rc
@@ -938,6 +1362,8 @@ def cmd_dispatch(args) -> int:
     bc_raw = meta.get("blocking_chain", "")
     blocking_chain = [x.strip() for x in bc_raw.split(",") if x.strip()] if bc_raw else []
     converge_invocation_id = meta.get("converge-invocation-id", "")
+    attempt_index = getattr(args, "attempt_index", 1)
+    recovery_safe = bool(getattr(args, "recovery_safe", False))
 
     # 解析 --forbid-paths（评审锚定污染对治）
     forbid_paths = [fp.strip() for fp in (getattr(args, "forbid_paths", None) or [])
@@ -995,6 +1421,11 @@ def cmd_dispatch(args) -> int:
         scope=scope,
         blocking_chain=blocking_chain,
         converge_invocation_id=converge_invocation_id,
+        total_timeout_min=getattr(args, "total_timeout", None),
+        renewal_minutes=getattr(args, "renewal_minutes", None),
+        max_renewals=getattr(args, "max_renewals", DEFAULT_MAX_RENEWALS),
+        recovery_safe=recovery_safe,
+        attempt_index=attempt_index,
     )
 
 
@@ -1013,7 +1444,7 @@ def _read_start_marker_exit(marker: Path) -> int | None:
 
 
 def _kill_worker(label: str, wd: Path) -> bool:
-    """按 PID 终止 worker 的 pwsh 进程树。返回 True 仅当 taskkill 报告成功。
+    """按 PID 终止进程树；仅在 PID 与已知后代均确认消失时返回 True。
 
     历史缺陷（2026-08-09 审计）：旧实现按 `WINDOWTITLE eq ocsr-*<label>*` 过滤，
     但代码从未设置过 pwsh 的窗口标题——`--title` 是传给 opencode 的**会话标题**，
@@ -1021,7 +1452,9 @@ def _kill_worker(label: str, wd: Path) -> bool:
     过滤器匹配不到任何进程，且函数无条件 return True，调用点也不检查返回值：
     看门狗「到期 kill」这条止损纪律在驱动器里实为空操作。
 
-    现按 `_launch_command` 捕获的真实 PID 终止，并校验 taskkill 退出码。
+    现按 `_launch_command` 捕获的真实 PID 终止，校验 taskkill 退出码，并轮询
+    Windows 进程表确认根 PID 与终止前捕获的所有后代都消失。身份不一致、PID
+    复用、残留后代或进程表不可读均 fail-closed。
     `/T` 连带终止子进程（launcher pwsh → opencode）；只杀目标 PID，
     不使用 `taskkill /IM`——那会连带杀死正在正常工作的兄弟 worker（见 SKILL.md「默认单 worker 闭环」）。
     """
@@ -1030,6 +1463,26 @@ def _kill_worker(label: str, wd: Path) -> bool:
         print(f"[ocsr] ⚠️ {label} 无可用 PID（{PID_FILE_NAME} 缺失或损坏），无法按 PID 终止",
               file=sys.stderr)
         return False
+    before = _query_process_table()
+    if not before:
+        print(f"[ocsr] ⚠️ {label} 无法读取进程表，拒绝在未知身份下终止", file=sys.stderr)
+        return False
+    identity = _read_json_object(wd / PROCESS_IDENTITY_FILE)
+    if (
+        identity is None
+        or identity.get("pid") != pid
+        or not str(identity.get("creation_time") or "").strip()
+        or not str(identity.get("command_fingerprint") or "").strip()
+    ):
+        print(f"[ocsr] ⚠️ {label} 缺少完整进程启动身份，拒绝终止未验证 PID={pid}",
+              file=sys.stderr)
+        return False
+    root = before.get(pid)
+    if root is None or root.get("creation_time") != identity.get("creation_time"):
+        print(f"[ocsr] ⚠️ {label} PID={pid} 启动身份不一致（可能 PID 复用），拒绝终止",
+              file=sys.stderr)
+        return False
+    tracked = {pid} | _descendant_pids(pid, before)
     try:
         proc = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -1043,7 +1496,18 @@ def _kill_worker(label: str, wd: Path) -> bool:
         print(f"[ocsr] ⚠️ {label} taskkill PID={pid} 失败 (rc={proc.returncode}): {detail}",
               file=sys.stderr)
         return False
-    return True
+    remaining = set(tracked)
+    for _ in range(20):
+        after = _query_process_table()
+        if not after:
+            time.sleep(0.25)
+            continue
+        remaining = tracked.intersection(after)
+        if not remaining:
+            return True
+        time.sleep(0.25)
+    print(f"[ocsr] ⚠️ {label} 终止后仍存在 PID/后代: {sorted(remaining)}", file=sys.stderr)
+    return False
 
 
 def _check_output_landed(
@@ -1086,6 +1550,11 @@ def _watch_loop(
     timeout_policy_requested: str = "",
     converge_invocation_id: str = "",
     forbid_paths: list[str] | None = None,
+    total_timeout_min: int | None = None,
+    renewal_minutes: int | None = None,
+    max_renewals: int = DEFAULT_MAX_RENEWALS,
+    recovery_safe: bool = False,
+    attempt_index: int = 1,
 ) -> int:
     """双监视：产物落盘 + 进程存活（start.marker exit 行）。
 
@@ -1099,17 +1568,42 @@ def _watch_loop(
     本函数返回 0/1/2；路径碰撞(3) 由 `cmd_dispatch` 在收口时覆盖。
     """
     landed: set[int] = set()
+    artifact_seen: set[int] = set()
     failed: set[int] = set()
     timed_out: set[int] = set()
     warned_stall: set[int] = set()
     # 每 worker 独立 deadline（口径已定：不是全局 max(start_times) 重算）。
-    # DB 锁重派后按该 worker 的新起点顺延它自己的 deadline，其余 worker 不受影响；
-    # 若沿用全局 deadline，重派出的 worker 会被陈旧 deadline 秒杀，
-    # 使 DB 锁重试机制在实践上失效。
+    renewal_minutes = timeout_min if renewal_minutes is None else renewal_minutes
+    total_timeout_min = (timeout_min * (max_renewals + 1)
+                         if total_timeout_min is None else total_timeout_min)
     deadlines: list[float] = [st + timeout_min * 60 for st in start_times]
+    total_deadlines: list[float] = [st + total_timeout_min * 60 for st in start_times]
+    renewal_counts: list[int] = [0 for _ in parsed]
+    previous_snapshots: list[dict] = []
     check_interval = 10  # 秒
-    retried: set[int] = set()          # 已 DB 锁重派过的 worker（控制流，布尔语义）
-    retry_count: dict[int, int] = {}   # worker idx → 重试次数（仅供 failure_retry_index 遥测）
+
+    for i, p in enumerate(parsed):
+        wd = p.get("work_dir")
+        if wd:
+            launch_snapshot = _capture_worker_snapshot(p, time.time(), snapshot_before)
+            previous_snapshots.append(launch_snapshot)
+            _write_worker_state(wd, {
+                "state": ("running" if launch_snapshot["process_tree_status"] == "running"
+                          else "unknown"),
+                "label": p["label"],
+                "inspection_deadline": deadlines[i],
+                "total_deadline": total_deadlines[i],
+                "renewal_count": renewal_counts[i], "max_renewals": max_renewals,
+                "attempt_index": attempt_index, "artifact_state": "missing",
+                "process_tree_status": launch_snapshot["process_tree_status"],
+                "session_status": launch_snapshot["session_status"],
+                "launch_baseline": _snapshot_progress_baseline(launch_snapshot),
+            })
+        else:
+            previous_snapshots.append({
+                "json_event_count": 0, "latest_file_change_ns": 0,
+                "artifact_state": "missing",
+            })
 
     def _settled() -> int:
         return len(landed) + len(failed) + len(timed_out)
@@ -1141,9 +1635,21 @@ def _watch_loop(
             error_file = wd / "error.log"
             start_marker = wd / "start.marker"
 
-            # 检查产物（新文件要求存在+size>0；预存文件要求内容变化）
+            # 检查产物。产物先出现只能记 artifact_seen；进程 exit=0 后才可 landed。
             is_landed, land_meta = _check_output_landed(output, snapshot_before)
-            if is_landed:
+            exit_code = _read_start_marker_exit(start_marker)
+            if is_landed and exit_code is None and i not in artifact_seen:
+                artifact_seen.add(i)
+                _append_dispatch_ledger(ledger, {
+                    "event": "artifact_seen", "label": p["label"], "model": p["model"],
+                    "output": str(output), "bytes": output.stat().st_size,
+                })
+                state = _read_json_object(wd / WORKER_STATE_FILE) or {}
+                state.setdefault("state", "unknown")
+                state.update({"artifact_state": "artifact_seen"})
+                _write_worker_state(wd, state)
+                print(f"[ocsr] 👁️ {p['label']} 产物已出现，等待进程结束后验收")
+            if is_landed and exit_code == 0 and not error_file.is_file():
                 elapsed = (now - start_times[i]) / 60
                 verdict = ""
                 fm = _parse_frontmatter(output)
@@ -1194,6 +1700,9 @@ def _watch_loop(
                 _append_dispatch_ledger(ledger, landed_row)
                 print(f"[ocsr] ✅ {p['label']} 落盘 ({output.stat().st_size}B, {elapsed:.1f}min{verdict})")
                 landed.add(i)
+                state = _read_json_object(wd / WORKER_STATE_FILE) or {}
+                state.update({"state": "landed", "artifact_state": "landed"})
+                _write_worker_state(wd, state)
                 continue
 
             # 检查启动错误
@@ -1215,52 +1724,18 @@ def _watch_loop(
                 continue
 
             # 进程存活检测（读 start.marker exit 行）
-            exit_code = _read_start_marker_exit(start_marker)
             if exit_code is not None:
                 elapsed = (now - start_times[i]) / 60
                 log_text = log_file.read_text(encoding="utf-8", errors="replace")[:500] if log_file.is_file() else ""
 
-                # DB 锁检测：延迟后自动重派一次（通道例外，见 refs/dispatch-patterns.md）。
-                # `retried` 与 `retry_count` 职责不同、不可合并：
-                #   retried    → 控制流，「是否已重派过」的确定性布尔语义
-                #   retry_count→ 遥测计数，写入 failure_retry_index
-                # 二者合一即重演历史上的 `retry_count[i] = 99` 哨兵式歧义。
-                if "database is locked" in log_text.lower() and i not in retried:
-                    launcher = wd / "launcher.ps1"
-                    if launcher.is_file():
-                        retry_count[i] = retry_count.get(i, 0) + 1
-                        retried.add(i)
-                        _append_telemetry(p["model"], _normalize_role(role), "detached", "error",
-                                          round(elapsed, 1), len(log_text),
-                                          f"database is locked, retry #{retry_count[i]}",
-                                          prompt_size_bytes=p.get("prompt_size_bytes", 0),
-                                          task_id=task_id, label=p.get("label", ""),
-                                          plan_ref=plan_ref,
-                                          scope=scope, blocking_chain=blocking_chain,
-                                          outcome_detail="error:database-locked-retry",
-                                          failure_retry_index=retry_count[i])
-                        _append_dispatch_ledger(ledger, {
-                            "event": "retried", "reason": "database_locked",
-                            "label": p["label"], "model": p["model"],
-                            "wall_min": round(elapsed, 1), "retry_index": retry_count[i],
-                        })
-                        print(f"[ocsr] 🔄 {p['label']} DB 锁，{RETRY_DELAY_DB_LOCK}s 后重派 "
-                              f"({retry_count[i]}/1)")
-                        time.sleep(RETRY_DELAY_DB_LOCK)
-                        for old in (start_marker, log_file, error_file):
-                            old.unlink(missing_ok=True)
-                        # 与初始派发共用 _launch_command：重派会覆盖刷新 pid.txt，
-                        # 否则看门狗到期时 taskkill 会打在已死的旧 PID 上。
-                        subprocess.run(
-                            ["powershell", "-NoProfile", "-Command", _launch_command(wd)],
-                            capture_output=True, timeout=30,
-                        )
-                        start_times[i] = time.time()
-                        # 该 worker 的 deadline 按新起点顺延；不顺延则重派出的 worker
-                        # 会被陈旧 deadline 秒杀，DB 锁重试机制形同虚设。
-                        deadlines[i] = start_times[i] + timeout_min * 60
-                        # 本 worker 仍未结案——不加入任何结案集合，循环继续监视它。
-                        continue
+                # DB 锁是确定性失败证据。watcher 禁止自行发起第二次模型调用；
+                # 新尝试必须由上层重新 reserve/settle 后显式派发。
+                if "database is locked" in log_text.lower():
+                    _append_dispatch_ledger(ledger, {
+                        "event": "recovery_required", "reason": "database_locked",
+                        "label": p["label"], "model": p["model"],
+                        "requires_new_reservation": True, "attempt_index": attempt_index,
+                    })
 
                 # 进程已退出而产物未落盘 —— 无论退出码是否为 0 都是确定性失败。
                 # `exit=0 且期望产物未落盘` 是第四条终结路径（§五 越界写入/路径碰撞的指纹）：
@@ -1308,9 +1783,8 @@ def _watch_loop(
                 print(f"[ocsr] ⚠️ {p['label']} 日志 0 字节已 {stalled_min:.0f}min（疑似静默停滞）")
                 warned_stall.add(i)
 
-        # 看门狗：逐 worker 用各自的 deadline 判定（非全局 deadline）。
-        # 已结案的 worker（landed / failed / timed_out）一律跳过——
-        # 否则会对已结案的失败做二次 kill、二次遥测、二次账本写入。
+        # 看门狗：检查期限先落 inspection_due 快照，再有限续期/报告/终止。
+        # total_deadline 在初始化后不可变，任何续期只能落在它之前。
         for i, p in enumerate(parsed):
             if i in landed or i in failed or i in timed_out:
                 continue
@@ -1319,8 +1793,106 @@ def _watch_loop(
             wd = p.get("work_dir")
             elapsed = (now - start_times[i]) / 60
             log_size = (wd / "run.log").stat().st_size if wd and (wd / "run.log").is_file() else 0
+            snapshot = _capture_worker_snapshot(p, now, snapshot_before)
+            state = {
+                "state": "inspection_due", "label": p["label"],
+                "inspection_deadline": deadlines[i],
+                "total_deadline": total_deadlines[i],
+                "renewal_count": renewal_counts[i], "max_renewals": max_renewals,
+                "attempt_index": attempt_index,
+                "inspection_baseline": _snapshot_progress_baseline(previous_snapshots[i]),
+                **snapshot,
+            }
+            _write_worker_state(wd, state)
+            _append_dispatch_ledger(ledger, {
+                "event": "inspection_due", "label": p["label"], "model": p["model"],
+                "inspection_deadline": deadlines[i], "total_deadline": total_deadlines[i],
+                "renewal_count": renewal_counts[i], "session_status": snapshot["session_status"],
+                "process_tree_status": snapshot["process_tree_status"],
+                "artifact_state": snapshot["artifact_state"],
+                "json_event_count": snapshot["json_event_count"],
+                "latest_json_event_timestamp": snapshot["latest_json_event_timestamp"],
+                "tool_status": snapshot["tool_status"],
+                "subagent_status": snapshot["subagent_status"],
+                "inspection_baseline": state["inspection_baseline"],
+            })
+            has_progress = _has_auditable_progress(previous_snapshots[i], snapshot)
+            if (
+                now < total_deadlines[i]
+                and has_progress
+                and renewal_counts[i] < max_renewals
+            ):
+                renewal_counts[i] += 1
+                deadlines[i] = min(now + renewal_minutes * 60, total_deadlines[i])
+                previous_snapshots[i] = snapshot
+                state.update({
+                    "state": "renewed", "inspection_deadline": deadlines[i],
+                    "renewal_count": renewal_counts[i], "renewal_reason": "auditable_progress",
+                })
+                _write_worker_state(wd, state)
+                _append_dispatch_ledger(ledger, {
+                    "event": "renewed", "label": p["label"], "model": p["model"],
+                    "inspection_deadline": deadlines[i], "total_deadline": total_deadlines[i],
+                    "renewal_count": renewal_counts[i], "reason": "auditable_progress",
+                })
+                print(f"[ocsr] 🔎 {p['label']} 检查到可审计进展，有限续期 "
+                      f"({renewal_counts[i]}/{max_renewals})")
+                continue
+            if timeout_policy == TIMEOUT_POLICY_HIERARCHICAL_REPORT and now < total_deadlines[i]:
+                # 软检查点只报告，不能把仍活跃的层级 worker 视为结案。观察器继续
+                # 双监视到不可变总期限；期间若进程退出，仍由上方 landed/failed 收口。
+                deadlines[i] = total_deadlines[i]
+                previous_snapshots[i] = snapshot
+                state.update({
+                    "state": "reported", "inspection_deadline": deadlines[i],
+                    "old_process_stop_verified": False, "resume_eligible": False,
+                    "handoff_required": False,
+                })
+                _write_worker_state(wd, state)
+                process_status = snapshot["process_tree_status"]
+                _append_telemetry(
+                    p["model"], _normalize_role(role), "detached", "stall",
+                    round(elapsed, 1), log_size,
+                    f"watchdog inspection {timeout_min}min, reported/{process_status}; tracking continues",
+                    prompt_size_bytes=p.get("prompt_size_bytes", 0),
+                    task_id=task_id, label=p.get("label", ""), plan_ref=plan_ref,
+                    scope=scope, blocking_chain=blocking_chain,
+                    outcome_detail=f"reported:{process_status}",
+                    timeout_policy_requested=timeout_policy_requested,
+                    timeout_policy_resolved=timeout_policy,
+                    worker_state="reported", inspection_deadline=deadlines[i],
+                    total_deadline=total_deadlines[i], renewal_count=renewal_counts[i],
+                    session_status=snapshot["session_status"],
+                    old_process_stop_verified=False, resume_eligible=False,
+                )
+                _append_dispatch_ledger(ledger, {
+                    "event": "reported", "reason": "watchdog_inspection_reported",
+                    "label": p["label"], "model": p["model"],
+                    "wall_min": round(elapsed, 1), "timeout_min": timeout_min,
+                    "log_bytes": log_size,
+                    "timeout_policy_requested": timeout_policy_requested,
+                    "timeout_policy_resolved": timeout_policy,
+                    "inspection_deadline": deadlines[i],
+                    "total_deadline": total_deadlines[i],
+                    "renewal_count": renewal_counts[i],
+                    "session_status": snapshot["session_status"],
+                    "process_tree_status": process_status,
+                    "old_process_stop_verified": False,
+                    "resume_eligible": False,
+                    "tracking_continues": True,
+                })
+                print(f"[ocsr] ⏰ {p['label']} 检查期限到达，报告/{process_status}；"
+                      f"继续跟踪至总期限")
+                continue
             if timeout_policy == TIMEOUT_POLICY_LEAF_KILL:
+                state["state"] = "terminating"
+                _write_worker_state(wd, state)
                 killed_ok = _kill_worker(p["label"], wd) if wd else False
+                resume_eligible = _write_resume_material(
+                    p, old_process_stop_verified=killed_ok,
+                    recovery_safe=recovery_safe, attempt_index=attempt_index,
+                    converge_invocation_id=converge_invocation_id,
+                )
                 if killed_ok:
                     outcome_detail_val = _parse_outcome_detail(
                         "stall", log_text=f"watchdog timeout {timeout_min}min")
@@ -1336,15 +1908,28 @@ def _watch_loop(
                                  f"kill FAILED (target process may still be running)")
                     progress_text = (f"[ocsr] ⏰ {p['label']} 超时 ({timeout_min}min)"
                                      f"→kill 失败，进程可能仍在运行，日志 {log_size}B")
-                event_result = "failed"
+                event_result = "stopped" if killed_ok else "timed_out"
                 fail_reason = "watchdog_timeout"
+                state.update({
+                    "state": "stopped" if killed_ok else "timed_out",
+                    "old_process_stop_verified": killed_ok,
+                    "resume_eligible": resume_eligible,
+                })
             else:
-                outcome_detail_val = "reported:alive"
-                note_text = f"watchdog timeout {timeout_min}min, reported/alive"
-                progress_text = (f"[ocsr] ⏰ {p['label']} 超时 ({timeout_min}min)"
-                                 f"→报告/alive（进程保留），日志 {log_size}B")
-                event_result = "reported"
-                fail_reason = "watchdog_reported"
+                # hierarchical_report 已持续观察到不可变总期限。进程仍未形成
+                # termination evidence 时明确交回上层，绝不伪装成已结案成功。
+                outcome_detail_val = "reported:handoff_required"
+                note_text = f"total deadline {total_timeout_min}min reached; handoff required"
+                progress_text = (f"[ocsr] ⏰ {p['label']} 总期限到达"
+                                 f"→明确交回上层（进程保留），日志 {log_size}B")
+                event_result = "handoff_required"
+                fail_reason = "total_deadline_handoff"
+                resume_eligible = False
+                state.update({
+                    "state": "timed_out", "old_process_stop_verified": False,
+                    "resume_eligible": False, "handoff_required": True,
+                })
+            _write_worker_state(wd, state)
             _append_telemetry(p["model"], _normalize_role(role), "detached", "stall",
                               round(elapsed, 1), log_size,
                               note_text,
@@ -1354,13 +1939,26 @@ def _watch_loop(
                               scope=scope, blocking_chain=blocking_chain,
                               outcome_detail=outcome_detail_val,
                               timeout_policy_requested=timeout_policy_requested,
-                              timeout_policy_resolved=timeout_policy)
+                              timeout_policy_resolved=timeout_policy,
+                              worker_state=state["state"],
+                              inspection_deadline=deadlines[i],
+                              total_deadline=total_deadlines[i],
+                              renewal_count=renewal_counts[i],
+                              session_status=snapshot["session_status"],
+                              old_process_stop_verified=state["old_process_stop_verified"],
+                              resume_eligible=resume_eligible)
             _append_dispatch_ledger(ledger, {
                 "event": event_result, "reason": fail_reason, "label": p["label"],
                 "model": p["model"], "wall_min": round(elapsed, 1),
                 "timeout_min": timeout_min, "log_bytes": log_size,
                 "timeout_policy_requested": timeout_policy_requested,
                 "timeout_policy_resolved": timeout_policy,
+                "inspection_deadline": deadlines[i],
+                "total_deadline": total_deadlines[i],
+                "renewal_count": renewal_counts[i],
+                "session_status": snapshot["session_status"],
+                "old_process_stop_verified": state["old_process_stop_verified"],
+                "resume_eligible": resume_eligible,
             })
             print(progress_text)
             timed_out.add(i)
@@ -2158,12 +2756,22 @@ def main():
     p_disp.add_argument("--stagger", type=int, default=DEFAULT_STAGGER, help=f"错峰间隔秒 (默认 {DEFAULT_STAGGER})")
     p_disp.add_argument("--watch", action="store_true", help="等待产物落盘（内置看门狗）")
     p_disp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"看门狗超时分钟 (默认 {DEFAULT_TIMEOUT})")
+    p_disp.add_argument("--total-timeout", type=int,
+                        help="每 worker 不可变总时限（分钟）；默认 timeout × (max-renewals + 1)")
+    p_disp.add_argument("--renewal-minutes", type=int,
+                        help="检查到可审计进展后的单次续期分钟数（默认等于 timeout）")
+    p_disp.add_argument("--max-renewals", type=int, default=DEFAULT_MAX_RENEWALS,
+                        help=f"检查期限的最大续期次数（默认 {DEFAULT_MAX_RENEWALS}）")
+    p_disp.add_argument("--attempt-index", type=int, choices=range(1, MAX_ATTEMPTS + 1), default=1,
+                        help="同一任务的总尝试序号（1..3）；恢复材料沿用此计数")
+    p_disp.add_argument("--recovery-safe", action="store_true",
+                        help="声明 worker 无副作用或已证明幂等；仅影响是否生成可用恢复材料")
     p_disp.add_argument("--timeout-policy", choices=sorted(TIMEOUT_POLICY_VALUES),
                         default=TIMEOUT_POLICY_AUTO,
                         help=f"超时行为策略: {TIMEOUT_POLICY_AUTO}=按角色自动解析（默认），"
                              f"{TIMEOUT_POLICY_LEAF_KILL}=到期 kill 进程，"
                              f"{TIMEOUT_POLICY_HIERARCHICAL_REPORT}=报告/alive 保留进程供 commander 裁决")
-    p_disp.add_argument("--progress", action="store_true", help="输出细粒度过程信息（已就绪/错峰/DB锁重试等；启动、落盘、失败、超时等关键生命周期行默认输出）")
+    p_disp.add_argument("--progress", action="store_true", help="输出细粒度过程信息（已就绪/错峰/恢复交回等；启动、落盘、失败、超时等关键生命周期行默认输出）")
     p_disp.add_argument("--work-dir", help="临时工作目录 (默认 $TEMP)")
     p_disp.add_argument("--harness", default="cli",
                         help="派发 harness 标识 (遥测归因用，默认 cli)")

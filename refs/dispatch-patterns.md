@@ -15,7 +15,7 @@
 
 | 码 | 含义 | 判据 |
 |---|---|---|
-| `0` | 全部 worker 落盘 | 每个 worker 的期望产物存在、非 0 字节（预存文件还须内容变化） |
+| `0` | 全部 worker 完成 | 每个 worker 均有 `start.marker` 中观察到的 `exit=0` 终止证据、无 `error.log`，且期望产物存在并非 0 字节（预存文件还须内容变化） |
 | `1` | 看门狗超时 | 至少一个 worker 到达自己的 deadline 仍未结案 |
 | `2` | 确定性失败 | 至少一个 worker 确定性失败：launcher error（`error.log` 存在）/ opencode 非零退出 / **opencode 退出码为 0 但期望产物未落盘** |
 | `3` | 路径碰撞 | 派发前后快照比对发现既有文件被非预期覆盖 |
@@ -29,8 +29,9 @@
 排序理由：3/1 为既有语义，保持最高优先级不变；确定性失败(2) 是**已结案的失败**，
 排在**未结案失联**(1) 之后——避免已记录在案的失败掩盖仍在消耗预算的失联进程。
 
-**`exit=0 且零产物` 为何算失败**：`_watch_loop` 判定进程结束只看
-`exit_code is not None`，退出码为 0 同样成立。「opencode 正常退出但期望产物没落盘」
+**`exit=0 且零产物` 为何算失败**：`_watch_loop` 只有在同时观察到
+`start.marker` 的 `exit=0`、不存在 `error.log` 且有效产物落盘时才记为完成。
+「opencode 正常退出但期望产物没落盘」
 是 [`failure-modes.md` 的“越界写入 / 路径碰撞”](failure-modes.md#越界写入--路径碰撞)的典型指纹（子代理自选文件名写到了别处）。
 若契约只覆盖「非零退出」，这条真实终结路径会继续表现为成功。
 该情形的遥测 `outcome_detail` 为 `error:exit_0_no_artifact`，便于事后归因。
@@ -56,6 +57,24 @@
 每个脱管或后台进程必须设硬阈值：有本机实测时为 `max(10 分钟, 1.5 × 该模型该角色实测单轮耗时)`；无样本时默认 15 分钟；单一大规模长任务可设 60 分钟。至少积累 5 次同类遥测样本才可调整默认模型或阈值。阈值到期后按 `--timeout-policy` 的解析结果处理，并如实记录；不得以无限轮询代替看护。
 
 手动终止前必须逐项记录：已达到该进程阈值、无派生子进程、日志尾部不显示正在执行、以及已评估中断副作用。只按目标 PID 终止，禁止按镜像名批量杀死兄弟 worker；中断后扫描残留并实跑项目验证。
+
+### 检查期限、续期与总期限
+
+看门狗阈值是**检查期限**而非击杀期限：到期后 watcher 先取快照（PID 与进程身份指纹、进程树、session 绑定、最近 JSON 事件自身时间、工具/子代理状态、产物状态），再按 `--timeout-policy` 三选一，不立即强杀：
+
+- **有限续期**（`renewed`）：默认最多 1 次（`--max-renewals`），步长 `--renewal-minutes`；任何续期都不得延长总期限。
+- **层级上报**（`reported`）：进程保留，仅作为交回上层裁决的显式状态，watcher 不删除跟踪、不并发重派。
+- **终止**（`stopped`/`timed_out`）：总期限到达后必须终止或交回上层。
+
+总期限为 `timeout × (max_renewals + 1)`，写入 `worker-state.json` 后不可变；worker 状态单向推进 `running → inspection_due → renewed | reported | terminating → stopped | timed_out | landed`。日志字节增长本身不构成有效进展；无法证明状态时进入 `reported`/`timed_out`，不得并发重派。
+
+完成判定要求终止证据与产物验收同时成立：期望产物存在、非 0 字节（预存文件还须内容变化）且抽样验收通过。产物先出现而进程仍活跃时只记 `artifact_seen` 并继续看护；产物出现后进程非零退出仍按确定性失败处理。
+
+### session 绑定与恢复材料
+
+launcher 以 `opencode run --format json` 流式解析顶层 `sessionID`，仅当唯一时写 `<wd>/session-binding.json`（含 session ID、PID、进程创建时间、命令指纹）；缺失或歧义只禁用后续续接，不改变本次 `opencode` 的真实退出码。**禁止**查询同目录 SQLite 或按“最新 session”猜测用于自动恢复。
+
+session 恢复由上层作为新的、显式授权的 invocation 发起：沿用同一任务的 attempt index 与三次总尝试上限，走新的 reserve/settle 记账。驱动器只生成 `<wd>/resume-material.json` 恢复材料，不自行执行；材料仅在 session 绑定可用、旧 PID 及其派生进程均确认消失（`old_process_stop_verified=true`）时可信。PID 复用、残留子进程或确认超时均为未知状态，禁止恢复。
 
 ### 失败切换阶梯
 
@@ -193,7 +212,7 @@ opencode run "$(cat prompts/worker-01.txt)" -m <qualified-id>
 
 输入侧：BOM-less UTF-8 的 prompt 文件在 PowerShell 5.1 下会被按 ANSI 误读成乱码，`Get-Content` 必须显式 `-Encoding UTF8`（pwsh 7 默认 UTF-8，但加上此参数两个版本通用）。编码行为随 opencode 版本变化，升级后需重新验证。
 
-失败诊断不依赖 stdout：成败判定以主文件“回收并验收”的**期望产物文件是否落盘**为准，退出码为辅。日志文件出现乱码时，先区分显示问题还是文件损坏——用 UTF-8 方式重读文件；若文件字节无误则仅为显示层乱码。
+失败诊断不依赖 stdout：完成判定要求明确的进程终止证据与主文件“回收并验收”定义的有效产物同时成立；只有产物、没有终止证据时仍须继续看护。日志文件出现乱码时，先区分显示问题还是文件损坏——用 UTF-8 方式重读文件；若文件字节无误则仅为显示层乱码。
 
 ## 派发遥测记录片段（PowerShell）
 
@@ -224,5 +243,16 @@ opencode run "$(cat prompts/worker-01.txt)" -m <qualified-id>
   note='<note>'
   timeout_policy_requested='<auto|leaf_kill|hierarchical_report>'
   timeout_policy_resolved='<leaf_kill|hierarchical_report>'
+  forbid_paths=<n>
+  read_audit='<read_audit>'
+  worker_state='<running|inspection_due|renewed|reported|landed|stopped|timed_out>'
+  inspection_deadline=<epoch_seconds>
+  total_deadline=<epoch_seconds>
+  renewal_count=<n>
+  session_status='<available|unbound|missing|ambiguous|identity_mismatch>'
+  old_process_stop_verified=<$true|$false>
+  resume_eligible=<$true|$false>
 } | ConvertTo-Json -Compress | Add-Content "$HOME/.ocsr/dispatch-log.jsonl"
 ```
+
+> 条件字段（`label`、`note`、`timeout_policy_*`、`forbid_paths`、`read_audit`、看门狗状态组）仅在非空或已触发时写入；`worker_state`、期限与续期、session 与恢复组由 `dispatch --watch` 的看护闭环产生，含义见“失败看护与切换”。

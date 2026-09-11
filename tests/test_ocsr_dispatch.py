@@ -1331,7 +1331,7 @@ class TestWatchLoopNoNameCollision:
                 {"output": Path(td) / "out1.md", "label": "w1", "model": "t/m",
                  "prompt_size_bytes": 10, "work_dir": wd},
             ]
-            start_times = [time.time(), time.time()]
+            start_times = [time.time() - 120, time.time() - 120]
             out1 = Path(td) / "out1.md"
             out1.write_text("pre-existing", encoding="utf-8")
             st = out1.stat()
@@ -1404,13 +1404,13 @@ class TestWatchdogTimeoutPolicy:
                             mod.DISPATCH_LOG = old_dl
             assert rc == 1
             assert len(kill_called) == 0, f"expected no kill, got {kill_called}"
-            # Check telemetry outcome_detail is reported:alive not stall:watchdog-timeout
+            # 到达总期限时必须明确 handoff，且仍不得 kill。
             found_reported = False
             for args, kwargs in telemetry_rows:
                 od = kwargs.get("outcome_detail", "")
-                if "reported:alive" in od:
+                if od.startswith("reported:"):
                     found_reported = True
-            assert found_reported, f"expected reported:alive in telemetry, got {telemetry_rows}"
+            assert found_reported, f"expected explicit reported outcome, got {telemetry_rows}"
 
     def test_default_policy_is_auto(self):
         """Default timeout policy is auto, with all three constants defined."""
@@ -1433,12 +1433,10 @@ class TestModelAllowlist:
         with mock.patch.object(mod, "_check_model_calls_disabled"):
             yield
 
-    ALLOWED = [
-        "xiaomi/mimo-v2.5",
-        "xiaomi/mimo-v2.5-pro",
-    ]
+    # ALLOWED_MODELS 由用户可编辑的 config/allowed-models.json 加载；
+    # 测试从实现加载结果派生，不得在测试内复制一份模型清单。
+    ALLOWED = sorted(mod.ALLOWED_MODELS)
     DISALLOWED = [
-        "deepseek/deepseek-v4-flash",
         "deepseek/deepseek-v4-pro",
         "deepseek/deepseek-v3",
         "deepseek/deepseek-r1",
@@ -1447,11 +1445,14 @@ class TestModelAllowlist:
         "claude-sonnet-4-20250514",
     ]
 
+    def test_disallowed_list_stays_disjoint_from_config(self):
+        assert not (set(self.DISALLOWED) & set(mod.ALLOWED_MODELS))
+
     def test_all_allowed_ids_accepted(self):
         for model in self.ALLOWED:
             mod._validate_model_allowed(model)  # must not raise
 
-    def test_deepseek_not_in_allowlist_rejected(self):
+    def test_non_allowlisted_ids_rejected(self):
         for model in self.DISALLOWED:
             with pytest.raises(ValueError, match="not in the OCSR allowlist"):
                 mod._validate_model_allowed(model)
@@ -1462,10 +1463,10 @@ class TestModelAllowlist:
 
     def test_allowed_models_is_frozenset(self):
         assert isinstance(mod.ALLOWED_MODELS, frozenset)
-        assert len(mod.ALLOWED_MODELS) == 2
+        assert len(mod.ALLOWED_MODELS) >= 1  # 加载器对空配置 fail-closed
 
     def test_allowed_models_exact_set(self):
-        assert mod.ALLOWED_MODELS == frozenset(self.ALLOWED)
+        assert mod.ALLOWED_MODELS == frozenset(mod._load_allowed_models())
 
     def test_user_editable_allowlist_file_is_loaded(self, tmp_path):
         path = tmp_path / "allowed-models.json"
@@ -1974,6 +1975,7 @@ class TestWatchReadAudit:
         wd.mkdir(parents=True)
         output = Path(td) / "out.md"
         output.write_text(artifact, encoding="utf-8")
+        (wd / "start.marker").write_text("exit=0\n", encoding="utf-8")
         parsed = [
             {"output": output, "label": "w0", "model": "t/m",
              "prompt_size_bytes": 10, "work_dir": wd},
