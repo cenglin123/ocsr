@@ -4,13 +4,14 @@
 
 ## 当前状态
 
+- 2026-09-11 看门狗超时与 Session 恢复已落地（计划见 `docs/plans/active/20260911-ocsr-watchdog-session-recovery.md`，状态：已执行）：检查期限与不可变总期限分离、有限续期（默认 1 次）、worker 单向状态机（`worker-state.json`）、`artifact_seen` 与 `landed` 分离、launcher 流式绑定唯一 `sessionID`（`session-binding.json`，缺失/歧义只禁用续接）、恢复材料 `resume-material.json`（`old_process_stop_verified` + `requires_settle`；恢复由上层以新 reserve/settle 显式发起，watcher 不自行重派）；DB 锁改为 `recovery_required` 停止，不再自动重试。专题文档与遥测模板已同步（`refs/dispatch-patterns.md`）。
 - 2026-09-06 与 pisr 同步的两项规则对齐：① 模型选择——默认白名单仅为作者本机模型池样例，每台机器首次使用前（及换机、通道异常归因后）先 `opencode models --verbose` 按本地池重配 `config/allowed-models.json` 再决定模型；② 评审合同——fresh 评审闭环补运行时验证合同，reviewer 以只读命令佐证时 prompt 须钉死禁止写入与修复、报告列明命令与退出码（OCSR 无进程级白名单，命令只读性属事后审计面；需进程级硬约束走 PISR）。
 - dsh 适配层计划已收敛（可执行），Phase 1 已落地：新增根级 `package.json`（`@ocsr/dsh-ocsr`）、`cordis.patch.yml`（插入 `ocsr-skill` 行）、`lib/index.js`（host 平面 `skills` runtime provider，provider 名 `ocsr`、插件名 `ocsr-skill`）、`refs/dsh-integration.md`（安装/配置/边界/版本锁定）。`dsh plugin --profile <p> add .` 后可由 dsh 技能系统发现 `ocsr` 技能，`resourceBase` 为 `{ kind: 'directory', path: <包根目录> }`。一等派发工具（`ocsr_dispatch`）已实现（Phase 2）：`lib/tool-ocsr.js`（`inject=['tools']`，host 平面 `tools` registry）+ `cordis.patch.yml` 的 `ocsr-tools` 行；工具为薄壳，把 schema 参数映射为 `scripts/ocsr_dispatch.py dispatch`，编排语义仍只在 Python。Phase 3（已实现）：`ocsr_dispatch` 支持 `background:true`（经 `ctx.jobs` 后台化，可被 `job_output`/`job_kill` 跟踪）；`dsh-ocsr` settings 白名单门（只收窄，未配置回退 driver）；best-effort/in-memory-only 的 `ocsr.jobs` session 投影（缓存存在时默认跳过注册）。
 - 派发驱动器为默认派发路径：`scripts/ocsr_dispatch.py`（dispatch/run/selftest/telemetry/summary/monitor/verify-ownership/preflight）。
-- **模型白名单**：由用户可编辑的 `config/allowed-models.json` 加载；仓库默认仅 `xiaomi/mimo-v2.5`、`xiaomi/mimo-v2.5-pro`。配置必须是非空、无重复的 qualified ID JSON 数组，错误时命令启动 fail-closed。
+- **模型白名单**：由用户可编辑的 `config/allowed-models.json` 加载；仓库默认含 `xiaomi/mimo-v2.5`、`xiaomi/mimo-v2.5-pro`、`minimax-cn/MiniMax-M3`、`deepseek/deepseek-v4-flash`（作者本机池样例，换机先按 2026-09-06 规则重配）。配置必须是非空、无重复的 qualified ID JSON 数组，错误时命令启动 fail-closed。
 - watcher 失败语义分层：exit=0 期望产物缺失时区分「0 产物」与「命名与 pattern 不符」（`_detect_name_mismatch`）。
 - 模型调用 tripwire：测试默认 `OCSR_DISABLE_MODEL_CALLS=1`。
-- 2026-08-19 复验：`verify_ocsr_skill.py`、`agent_links.py check`、`audit.py check` 与 `git diff --check` 通过；`pytest tests/ -q` 为 257 passed、1 failed。失败项 `TestPidCaptureAndKill.test_kill_actually_terminates_process` 的 `taskkill` 返回 `Access denied`，发生在测试启动的 PowerShell 子进程，未改动源码或测试。
+- 2026-09-11 复验：`verify_ocsr_skill.py`（13 项、无 INFO）、`agent_links.py check`、`audit.py check`、`git diff --check` 与 `pytest tests/ -q` 全部通过（295 passed）。
 - OCSR 渐进式披露重构已实施，并经最终独立终验批准：`SKILL.md` 仅保留默认单 worker 闭环与全局不变量；按能力条件加载各 `refs/`。fresh 对抗评审细则唯一收敛在 `refs/failure-modes.md`；派发失败切换、静默停滞与终止细则收敛在 `refs/dispatch-patterns.md`；`run --spec` 仅让“已提取但未命中具名 route”的值通过 `"*"` 暂停，其他契约失败 fail-closed。2026-08-19 已清除活动源、文档与测试中指向旧 `SKILL.md` 章节编号的导航，改为具名入口或直接专题链接；定向 `run-spec`/派发回归为 231 passed。
 
 ## 接手顺序
