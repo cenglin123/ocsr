@@ -966,16 +966,28 @@ def _collision_report(
     before: dict[str, tuple[int, int]],
     expected: set[str],
     ledger: Path | None,
+    allow_overwrite: frozenset[str] | set[str] = frozenset(),
 ) -> bool:
-    """比对派发前后快照。返回 True 表示**既有文件被非预期覆盖**（真实损失）。"""
+    """比对派发前后快照。返回 True 表示**既有文件被非预期覆盖**（真实损失）。
+
+    `allow_overwrite`：调用方（如 converge adapter 的 --in-place-edit）声明允许原地
+    改写的文件名集合。命中者记为 declared_overwrite：打印 WARN + 账本留痕，但不计入
+    返回值（不判批次失败）。未声明者照旧视为非预期覆盖。"""
     after = _snapshot_dir(output_dir)
     ignore = expected | {CONVERGE_LEDGER_NAME}
-    overwritten = sorted(
+    changed = sorted(
         n for n, meta in after.items()
         if n in before and before[n] != meta and n not in ignore
     )
+    declared = sorted(n for n in changed if n in allow_overwrite)
+    overwritten = sorted(n for n in changed if n not in allow_overwrite)
     unexpected_new = sorted(n for n in after if n not in before and n not in ignore)
 
+    if declared:
+        print(f"[ocsr] ⚠️ {len(declared)} 个既有文件被声明式覆盖（--allow-overwrite，不计失败）：",
+              file=sys.stderr)
+        for n in declared:
+            print(f"        {n}  {before[n][0]}B → {after[n][0]}B", file=sys.stderr)
     if overwritten:
         print(f"[ocsr] ❌ {len(overwritten)} 个既有文件被非预期覆盖：", file=sys.stderr)
         for n in overwritten:
@@ -986,12 +998,15 @@ def _collision_report(
         print(f"[ocsr] ⚠️ {len(unexpected_new)} 个非预期新增文件："
               f"{', '.join(unexpected_new[:5])}", file=sys.stderr)
 
-    if overwritten or unexpected_new:
-        _append_dispatch_ledger(ledger, {
+    if overwritten or unexpected_new or declared:
+        row = {
             "event": "path_anomaly",
             "overwritten": overwritten,
             "unexpected_new": unexpected_new,
-        })
+        }
+        if declared:
+            row["declared_overwrite"] = declared
+        _append_dispatch_ledger(ledger, row)
         _append_telemetry("-", "ocsr-dispatch", "detached",
                           "path_collision" if overwritten else "unexpected_write",
                           0, 0, f"overwritten={overwritten} new={unexpected_new}",
@@ -1142,6 +1157,7 @@ def _dispatch_batch(
     max_renewals: int = DEFAULT_MAX_RENEWALS,
     recovery_safe: bool = False,
     attempt_index: int = 1,
+    allow_overwrite: list[str] | None = None,
 ) -> int:
     """派发内核：**已解析完毕**的 worker 批次 → 退出码。
 
@@ -1314,7 +1330,8 @@ def _dispatch_batch(
                          max_renewals=max_renewals,
                          recovery_safe=recovery_safe,
                          attempt_index=attempt_index)
-        if _collision_report(output_dir, snapshot_before, expected_names, ledger):
+        if _collision_report(output_dir, snapshot_before, expected_names, ledger,
+                              allow_overwrite=frozenset(allow_overwrite or ())):
             return EXIT_PATH_COLLISION
         return rc
 
@@ -1426,6 +1443,7 @@ def cmd_dispatch(args) -> int:
         max_renewals=getattr(args, "max_renewals", DEFAULT_MAX_RENEWALS),
         recovery_safe=recovery_safe,
         attempt_index=attempt_index,
+        allow_overwrite=list(getattr(args, "allow_overwrite", None) or []),
     )
 
 
@@ -2780,6 +2798,8 @@ def main():
     p_disp.add_argument("--meta", action="append", metavar="KEY=VAL",
                         help="元数据键值对（可多次指定），如 task_id=xxx role=executor "
                              "plan_ref=path blocking_chain=a,b,c scope=outer")
+    p_disp.add_argument("--allow-overwrite", action="append", metavar="NAME",
+                        help="声明允许原地改写的既有文件名（记 declared_overwrite，不判批次失败；可重复）")
     p_disp.add_argument("--forbid-paths", action="append", metavar="PATH",
                         help="禁止 worker 读取的路径（目录或文件，可多次指定）。"
                              "向 prompt 副本注入禁止块（不改原文件），"

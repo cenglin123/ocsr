@@ -2065,3 +2065,61 @@ class TestDetectNameMismatch:
     def test_missing_dir_returns_empty(self, tmp_path):
         out = tmp_path / "no-such-dir" / "expected.md"
         assert mod._detect_name_mismatch(out, {}, "w0") == []
+
+
+# ─── 声明式覆盖：--allow-overwrite / _collision_report ──────────────────
+
+class TestAllowOverwrite:
+    """plan 20260912：converge adapter --in-place-edit 的上游承载。
+
+    声明覆盖（declared_overwrite）→ WARN + 账本留痕 + 不判批次失败；
+    未声明覆盖 → 照旧 ❌ + 返回 True。
+    """
+
+    def _scenario(self, tmp_path: Path, allow: frozenset[str]) -> tuple[bool, list[dict]]:
+        d = tmp_path
+        (d / "plan.md").write_text("old", encoding="utf-8")
+        before = mod._snapshot_dir(d)
+        (d / "plan.md").write_text("new-longer-content", encoding="utf-8")
+        led = d / "ocsr-dispatch-ledger.jsonl"
+        rc = mod._collision_report(
+            d, before, {"expected.md"}, led, allow_overwrite=allow
+        )
+        rows = [
+            json.loads(line)
+            for line in led.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return rc, [r for r in rows if r.get("event") == "path_anomaly"]
+
+    def test_declared_overwrite_warns_and_passes(self, tmp_path: Path):
+        rc, rows = self._scenario(tmp_path, frozenset({"plan.md"}))
+        assert rc is False
+        assert rows and rows[0].get("declared_overwrite") == ["plan.md"]
+        assert rows[0]["overwritten"] == []
+
+    def test_undeclared_overwrite_still_fails(self, tmp_path: Path):
+        rc, rows = self._scenario(tmp_path, frozenset())
+        assert rc is True
+        assert rows and rows[0]["overwritten"] == ["plan.md"]
+        assert "declared_overwrite" not in rows[0]
+
+    def test_partial_declaration_fails_on_undeclared(self, tmp_path: Path):
+        d = tmp_path
+        (d / "plan.md").write_text("old", encoding="utf-8")
+        (d / "other.md").write_text("old", encoding="utf-8")
+        before = mod._snapshot_dir(d)
+        (d / "plan.md").write_text("new-plan", encoding="utf-8")
+        (d / "other.md").write_text("new-other", encoding="utf-8")
+        led = d / "ocsr-dispatch-ledger.jsonl"
+        rc = mod._collision_report(
+            d, before, {"expected.md"}, led, allow_overwrite=frozenset({"plan.md"})
+        )
+        assert rc is True  # other.md 未声明 → 批次仍失败
+        rows = [
+            json.loads(line)
+            for line in led.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert rows[0]["overwritten"] == ["other.md"]
+        assert rows[0]["declared_overwrite"] == ["plan.md"]
