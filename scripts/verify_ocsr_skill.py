@@ -18,7 +18,12 @@ _SPEC = importlib.util.spec_from_file_location("ocsr_dispatch_verify", DISPATCH_
 _DISPATCH_MOD = importlib.util.module_from_spec(_SPEC) if _SPEC and _SPEC.loader else None
 if _DISPATCH_MOD:
     sys.modules[_SPEC.name] = _DISPATCH_MOD
-    _SPEC.loader.exec_module(_DISPATCH_MOD)
+    try:
+        _SPEC.loader.exec_module(_DISPATCH_MOD)
+    except Exception as exc:  # bad allowlist config must report FAIL, not crash
+        print(f"FAIL: cannot load ocsr_dispatch.py: {exc}")
+        _DISPATCH_MOD = None
+if _DISPATCH_MOD:
     TELEMETRY_FIELDS = getattr(_DISPATCH_MOD, "TELEMETRY_FIELDS", {})
 else:
     TELEMETRY_FIELDS = {}
@@ -324,7 +329,11 @@ def check_telemetry_fields():
 
 
 def check_allowlist():
-    """Verify the user-editable model allowlist loads as a non-empty frozenset."""
+    """Verify the user-local model allowlist loader state.
+
+    Unconfigured (missing or empty file) is a legal state by design — first
+    use must ask the user. Configured (non-empty) reports the loaded IDs.
+    """
     ok = True
     allowed = getattr(_DISPATCH_MOD, "ALLOWED_MODELS", None) if _DISPATCH_MOD else None
     if allowed is None:
@@ -333,14 +342,13 @@ def check_allowlist():
     if not isinstance(allowed, frozenset):
         print("FAIL: ALLOWED_MODELS is not a frozenset")
         ok = False
-    if not allowed:
-        print("FAIL: ALLOWED_MODELS is empty")
-        ok = False
     config_path = getattr(_DISPATCH_MOD, "ALLOWED_MODELS_PATH", None) if _DISPATCH_MOD else None
-    if not config_path or not config_path.is_file():
-        print("FAIL: user-editable allowed-models.json not found")
+    if not config_path:
+        print("FAIL: ALLOWED_MODELS_PATH not found")
         ok = False
-    if ok:
+    if ok and not allowed:
+        print("PASS: model allowlist unconfigured (missing or empty; first use must ask the user)")
+    elif ok:
         print(f"PASS: user-editable ALLOWED_MODELS loaded: {', '.join(sorted(allowed))}")
     return ok
 

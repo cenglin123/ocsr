@@ -32,7 +32,7 @@ _SPEC.loader.exec_module(rs)
 
 yaml = pytest.importorskip("yaml", reason="spec 校验依赖 PyYAML")
 
-ALLOWED = {"xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5-pro"}
+ALLOWED = {"vendor/model-a", "vendor/model-b"}
 
 
 def _write(td: Path, text: str, name: str = "spec.yaml") -> Path:
@@ -72,7 +72,7 @@ class TestValidSpec:
       - id: r1
         type: dispatch
         scope: some-group
-        model: xiaomi/mimo-v2.5-pro
+        model: vendor/model-b
         prompt: p.txt
         output: "{{run.workdir}}/out.md"
         pre:
@@ -262,7 +262,7 @@ class TestFailClosed:
 
     def test_prompt_file_missing(self):
         self._expect(HEAD + """\
-      - {id: a, type: dispatch, model: xiaomi/mimo-v2.5-pro, prompt: nope.txt, output: o}
+      - {id: a, type: dispatch, model: vendor/model-b, prompt: nope.txt, output: o}
 """, "dispatch-prompt-missing")
 
     def test_duplicate_step_id(self):
@@ -368,10 +368,18 @@ class TestScopeOpacityInvariant:
 
 # ─── CLI ─────────────────────────────────────────────────────────────
 class TestCli:
-    def _run(self, args: list[str]):
+    def _run(self, args: list[str], env_extra: dict | None = None):
         env = dict(os.environ, OCSR_DISABLE_MODEL_CALLS="1", PYTHONIOENCODING="utf-8")
+        env.update(env_extra or {})
         return subprocess.run([sys.executable, str(DISPATCH), *args],
                               capture_output=True, text=True, encoding="utf-8", env=env)
+
+    @staticmethod
+    def _allowlist_env(td: Path) -> dict:
+        """进程外 CLI 走真实白名单加载——测试自带合成配置，不依赖用户本地文件。"""
+        cfg = td / "allowed-models.json"
+        cfg.write_text('["vendor/model-a"]', encoding="utf-8")
+        return {"OCSR_ALLOWED_MODELS_PATH": str(cfg)}
 
     def test_validate_ok_exit_zero(self):
         with tempfile.TemporaryDirectory() as t:
@@ -408,18 +416,20 @@ class TestCli:
     version: 1
     run: {id: t, workdir: %s}
     steps:
-      - {id: a, type: dispatch, model: xiaomi/mimo-v2.5-pro, prompt: p.txt, output: "{{run.workdir}}/o.md"}
+      - {id: a, type: dispatch, model: vendor/model-a, prompt: p.txt, output: "{{run.workdir}}/o.md"}
 """ % (td / "wd").as_posix())
-            r = self._run(["run", "--spec", str(p)])
+            r = self._run(["run", "--spec", str(p)], env_extra=self._allowlist_env(td))
         assert r.returncode != 0, r.stdout
         assert "OCSR_DISABLE_MODEL_CALLS" in (r.stdout + r.stderr)
 
     def test_validate_makes_no_model_call(self):
         """--validate 是纯离线的：即便 tripwire 开着也必须正常工作。"""
         with tempfile.TemporaryDirectory() as t:
-            p = _write(Path(t), HEAD + """\
-      - {id: a, type: dispatch, model: xiaomi/mimo-v2.5-pro, prompt: p.txt, output: o}
+            td = Path(t)
+            p = _write(td, HEAD + """\
+      - {id: a, type: dispatch, model: vendor/model-a, prompt: p.txt, output: o}
 """)
-            (Path(t) / "p.txt").write_text("x", encoding="utf-8")
-            r = self._run(["run", "--spec", str(p), "--validate"])
+            (td / "p.txt").write_text("x", encoding="utf-8")
+            r = self._run(["run", "--spec", str(p), "--validate"],
+                          env_extra=self._allowlist_env(td))
         assert r.returncode == 0, r.stderr

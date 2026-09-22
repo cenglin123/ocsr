@@ -1,6 +1,6 @@
 # `run --spec` 步骤运行器 — 完整 schema 与语义
 
-> 由 [`SKILL.md`](../SKILL.md) 委托。设计依据：`docs/plans/active/20260810-deterministic-run-spec.md`。
+> 由 [`SKILL.md`](../SKILL.md) 委托。契约与语义以本文件为唯一事实源。
 > 实现：`scripts/ocsr_run_spec.py`（校验 + 执行）、`ocsr_dispatch.py run`（CLI）。
 
 ## 它解决什么

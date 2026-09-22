@@ -150,16 +150,39 @@ _USER_HOME = str(Path.home())
 _USER_HOME_FORWARD = _USER_HOME.replace("\\", "/")
 
 # ─── 模型白名单 ───────────────────────────────────────────────────────
-ALLOWED_MODELS_PATH = Path(__file__).resolve().parents[1] / "config" / "allowed-models.json"
+# 用户本地维护（不入库）。OCSR_ALLOWED_MODELS_PATH 可覆盖配置文件路径（测试/多套配置）。
+DEFAULT_ALLOWED_MODELS_PATH = Path(__file__).resolve().parents[1] / "config" / "allowed-models.json"
+ALLOWED_MODELS_PATH = Path(
+    os.environ.get("OCSR_ALLOWED_MODELS_PATH") or DEFAULT_ALLOWED_MODELS_PATH
+)
+
+UNCONFIGURED_GUIDANCE = (
+    "OCSR model allowlist is not configured (missing or empty file).\n"
+    "Run 'opencode models --verbose', ask the user which models to enable, "
+    "then write the qualified IDs (provider/model) as a JSON array to "
+    f"{ALLOWED_MODELS_PATH}."
+)
 
 
 def _load_allowed_models(path: Path = ALLOWED_MODELS_PATH) -> tuple[str, ...]:
-    """Load the user-editable model allowlist and fail closed on bad configuration."""
+    """Load the user-local model allowlist.
+
+    Missing file, blank file, or an empty array = unconfigured (returns ()).
+    Invalid configuration (bad JSON / bad entries / duplicates) fails closed.
+    """
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
         raise RuntimeError(f"Cannot load OCSR model allowlist from {path}: {exc}") from exc
-    if not isinstance(raw, list) or not raw or any(
+    if not text.strip():
+        return ()
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Cannot load OCSR model allowlist from {path}: {exc}") from exc
+    if not isinstance(raw, list) or any(
         not isinstance(item, str)
         or (parts := item.split("/")) != [part.strip() for part in parts]
         or len(parts) != 2
@@ -167,7 +190,7 @@ def _load_allowed_models(path: Path = ALLOWED_MODELS_PATH) -> tuple[str, ...]:
         for item in raw
     ):
         raise RuntimeError(
-            f"OCSR model allowlist at {path} must be a non-empty JSON array of provider/model IDs."
+            f"OCSR model allowlist at {path} must be a JSON array of provider/model IDs."
         )
     if len(raw) != len(set(raw)):
         raise RuntimeError(f"OCSR model allowlist at {path} contains duplicate model IDs.")
@@ -176,11 +199,13 @@ def _load_allowed_models(path: Path = ALLOWED_MODELS_PATH) -> tuple[str, ...]:
 
 _CONFIGURED_MODELS = _load_allowed_models()
 ALLOWED_MODELS = frozenset(_CONFIGURED_MODELS)
-DEFAULT_MODEL = _CONFIGURED_MODELS[0]
+DEFAULT_MODEL = _CONFIGURED_MODELS[0] if _CONFIGURED_MODELS else None
 
 
 def _validate_model_allowed(model: str) -> None:
     """Validate model is in the OCSR allowlist. Raises ValueError with clear error."""
+    if not ALLOWED_MODELS:
+        raise ValueError(UNCONFIGURED_GUIDANCE)
     if model not in ALLOWED_MODELS:
         allowed = ", ".join(sorted(ALLOWED_MODELS))
         raise ValueError(

@@ -11,8 +11,9 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 
 ## 配置
 
-- 模型白名单仍由 `config/allowed-models.json` 唯一决定（仓库默认 `xiaomi/mimo-v2.5`、`xiaomi/mimo-v2.5-pro`）。该文件相对包根目录解析，dsh 安装后仍随包携带。
-- dsh 侧无需为技能加载额外配置；`skill-filesystem` 的 `customSkillDirs` 不是本接入路径。若要覆盖模型白名单，直接编辑已安装包根的 `config/allowed-models.json`（注意重装会覆盖，需通过覆盖/分发维护差异化）。
+- 模型白名单仍由 `config/allowed-models.json` 唯一决定（相对包根目录解析）。该文件**用户本地维护、不入库、不随 npm 包分发**（`package.json` 的 `files` 不含 `config/`）：安装后文件缺失或为空即「未配置」，首次派发前询问用户启用哪些模型并写入；非空则直接使用。格式非法 fail-closed。
+- dsh 侧无需为技能加载额外配置；`skill-filesystem` 的 `customSkillDirs` 不是本接入路径。若要覆盖模型白名单，直接编辑已安装包根的 `config/allowed-models.json`（注意重装会清除，需自行备份/重配）。
+- **settings 门的作用域**：`dsh-ocsr` settings 的 `allowedModels` 只收窄门仅在 dsh 工具面（`ocsr_dispatch` 工具调用）生效；绕过工具直接调 `python scripts/ocsr_dispatch.py dispatch` 只受 driver 基线白名单约束。
 
 ## 边界
 
@@ -22,8 +23,20 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 
 ## 版本锁定
 
-- 本 Phase 1 以 `@deepseek-ai/dsh` `0.1.1-rc.2` 全局安装 checkout 实测验证（路径 `C:\\Users\\Administrator\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh`）。宿主 API（`skills` registry、`registerProvider(control)`、candidate/definition 契约）以该版本为准；升级宿主时先复核这些接口再保留本适配。
+- 本 Phase 1 以 `@deepseek-ai/dsh` `0.1.1-rc.2` 全局安装 checkout 实测验证（路径 `<user-home>/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh`）。宿主 API（`skills` registry、`registerProvider(control)`、candidate/definition 契约）以该版本为准；升级宿主时先复核这些接口再保留本适配。
 - `package.json` peerDependencies 锁 `@deepseek-ai/dsh-skill ^0.1.1-rc.2`、`@deepseek-ai/cordis ^4.0.1`。
+
+## 工具层错误码
+
+`ocsr_dispatch` 工具的结果 `code` 有两套来源，刻意不混用：
+
+| 来源 | 取值 | 含义 |
+|---|---|---|
+| driver 子进程退出码（原样透传） | `0/1/2/3` | 见 [`dispatch-patterns.md`](dispatch-patterns.md) §退出码契约 |
+| 工具层自判 | `4` | 模型门拒绝（settings 收窄门 / 白名单外 / worker 串无法解析） |
+| 工具层自判 | `5` | 无法执行 driver（解释器缺失、jobs 服务不可用、后台注册失败） |
+
+Python 解释器由 `OCSR_PYTHON` 环境变量指定（默认 `python`）。
 
 ## Phase 2（已实现）/ Phase 3（已实现，含如下新增）
 
@@ -35,7 +48,7 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 - `python scripts/verify_ocsr_skill.py`
 - `python scripts/agent_links.py check`（协议：先在 `AGENTS.md` 改动后运行 `repair` 同步 `CLAUDE.md`/`GEMINI.md`）
 - `python scripts/audit.py check`
-- `pytest tests/ -q`（基线：257 passed + 1 已知环境相关失败 `TestPidCaptureAndKill.test_kill_actually_terminates_process`，Windows `taskkill` 对测试启动的 PowerShell 子进程返回 `Access denied`）
+- `pytest tests/ -q`（基线以 `docs/CURRENT.md` 最近一次复验记录为准；测试自带合成配置，不依赖本机 `config/allowed-models.json`）
 - `git diff --check`
 - 发布包完整性：`npm pack --dry-run`，核对包含 `cordis.patch.yml`、`SKILL.md`、`scripts/`、`config/`、`refs/`、`lib/index.js`。
 - 非仓库目录 `/skill ocsr`（或模型 skill 工具，后者须 preset 挂载 `tool-skill`）可加载，`resourceBase` 为目录对象。

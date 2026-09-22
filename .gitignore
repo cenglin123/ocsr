@@ -29,3 +29,6 @@ Thumbs.db
 
 .agent/
 
+# User-local model allowlist (machine-specific; first use asks the user).
+config/allowed-models.json
+

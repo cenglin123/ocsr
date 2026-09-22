@@ -11,10 +11,8 @@
   },
   "files": [
     "lib",
-    "lib/index.js",
     "SKILL.md",
     "scripts",
-    "config",
     "refs",
     "cordis.patch.yml"
   ],

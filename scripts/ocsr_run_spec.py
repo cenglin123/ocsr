@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """ocsr_run_spec.py — 确定性步骤运行器的 spec 解析与离线校验层。
 
-对应 `docs/plans/active/20260810-deterministic-run-spec.md` 的 D1/D2/D3/D4/D8/D10。
+契约条款与语义见 `refs/run-spec.md`（D1/D2/D3/D4/D8/D10）。
 本模块**只做离线校验与确定性展开**，不发起任何模型调用、不启动任何进程。
 
 设计约束（与 SKILL.md 的 `run --spec` 默认边界对齐）：
@@ -900,7 +900,7 @@ def _execute_dispatch(step: dict, sid: str, ctx: dict, workdir: Path,
     if dispatch_fn is None:
         return (False,
                 f"steps.{sid}: dispatch 步骤的执行能力属阶段 5，尚未接线。"
-                "见 docs/plans/active/20260810-deterministic-run-spec.md 阶段表。",
+                "见 refs/run-spec.md。",
                 "", 1)
     out_path = Path(render(step["output"], ctx))
     if not _inside(out_path, workdir):
