@@ -1433,9 +1433,9 @@ class TestModelAllowlist:
         with mock.patch.object(mod, "_check_model_calls_disabled"):
             yield
 
-    # ALLOWED_MODELS 由用户可编辑的 config/allowed-models.json 加载；
-    # 测试从实现加载结果派生，不得在测试内复制一份模型清单。
-    ALLOWED = sorted(mod.ALLOWED_MODELS)
+    # ALLOWED_MODELS 由用户本地的 config/allowed-models.json 加载（不入库，
+    # 未配置合法）。测试一律用合成白名单或临时配置注入，不依赖用户真实配置。
+    SYNTHETIC = {"vendor/model-a", "vendor/model-b"}
     DISALLOWED = [
         "deepseek/deepseek-v4-pro",
         "deepseek/deepseek-v3",
@@ -1445,36 +1445,57 @@ class TestModelAllowlist:
         "claude-sonnet-4-20250514",
     ]
 
+    @pytest.fixture
+    def synthetic_allowlist(self, monkeypatch):
+        monkeypatch.setattr(mod, "ALLOWED_MODELS", frozenset(self.SYNTHETIC))
+        monkeypatch.setattr(mod, "DEFAULT_MODEL", "vendor/model-a")
+
     def test_disallowed_list_stays_disjoint_from_config(self):
         assert not (set(self.DISALLOWED) & set(mod.ALLOWED_MODELS))
 
-    def test_all_allowed_ids_accepted(self):
-        for model in self.ALLOWED:
+    def test_all_allowed_ids_accepted(self, synthetic_allowlist):
+        for model in sorted(self.SYNTHETIC):
             mod._validate_model_allowed(model)  # must not raise
 
-    def test_non_allowlisted_ids_rejected(self):
+    def test_non_allowlisted_ids_rejected(self, synthetic_allowlist):
         for model in self.DISALLOWED:
             with pytest.raises(ValueError, match="not in the OCSR allowlist"):
                 mod._validate_model_allowed(model)
 
-    def test_mimo_ultraspeed_rejected(self):
+    def test_mimo_ultraspeed_rejected(self, synthetic_allowlist):
         with pytest.raises(ValueError, match="not in the OCSR allowlist"):
             mod._validate_model_allowed("xiaomi/mimo-v2.5-pro-ultraspeed")
 
+    def test_unconfigured_allowlist_fails_closed(self, monkeypatch):
+        monkeypatch.setattr(mod, "ALLOWED_MODELS", frozenset())
+        with pytest.raises(ValueError, match="not configured"):
+            mod._validate_model_allowed("vendor/model-a")
+
     def test_allowed_models_is_frozenset(self):
         assert isinstance(mod.ALLOWED_MODELS, frozenset)
-        assert len(mod.ALLOWED_MODELS) >= 1  # 加载器对空配置 fail-closed
 
     def test_allowed_models_exact_set(self):
         assert mod.ALLOWED_MODELS == frozenset(mod._load_allowed_models())
+
+    def test_default_model_tracks_loader(self):
+        configured = mod._load_allowed_models()
+        assert mod.DEFAULT_MODEL == (configured[0] if configured else None)
 
     def test_user_editable_allowlist_file_is_loaded(self, tmp_path):
         path = tmp_path / "allowed-models.json"
         path.write_text('["vendor/example-model"]', encoding="utf-8")
         assert mod._load_allowed_models(path) == ("vendor/example-model",)
 
+    @pytest.mark.parametrize("content", ["[]", "  \n", ""])
+    def test_empty_or_blank_allowlist_is_unconfigured(self, tmp_path, content):
+        path = tmp_path / "allowed-models.json"
+        path.write_text(content, encoding="utf-8")
+        assert mod._load_allowed_models(path) == ()
+
+    def test_missing_allowlist_file_is_unconfigured(self, tmp_path):
+        assert mod._load_allowed_models(tmp_path / "nope.json") == ()
+
     @pytest.mark.parametrize("content", [
-        "[]",
         '["xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5"]',
         "{}",
         '[" "]',
@@ -1491,9 +1512,6 @@ class TestModelAllowlist:
         path.write_text(content, encoding="utf-8")
         with pytest.raises(RuntimeError, match="allowlist"):
             mod._load_allowed_models(path)
-
-    def test_default_model_is_first_configured_model(self):
-        assert mod.DEFAULT_MODEL == mod._load_allowed_models()[0]
 
     def test_dispatch_rejects_before_launcher(self):
         """dispatch must reject disallowed model before creating any launcher."""
@@ -1558,14 +1576,14 @@ class TestModelCallsTripwire:
         with mock.patch.object(mod, "_check_model_calls_disabled") as mock_check:
             mock_check.side_effect = SystemExit(1)
             with pytest.raises(SystemExit):
-                mod.cmd_selftest(mock.Mock(model="xiaomi/mimo-v2.5"))
+                mod.cmd_selftest(mock.Mock(model="vendor/model-a"))
             mock_check.assert_called_once()
 
     def test_tripwire_env_var_checked_at_preflight_entry(self):
         with mock.patch.object(mod, "_check_model_calls_disabled") as mock_check:
             mock_check.side_effect = SystemExit(1)
             with pytest.raises(SystemExit):
-                mod.cmd_preflight(mock.Mock(model=["xiaomi/mimo-v2.5"], timeout=30))
+                mod.cmd_preflight(mock.Mock(model=["vendor/model-a"], timeout=30))
             mock_check.assert_called_once()
 
     def test_tripwire_prints_message(self):
@@ -1815,7 +1833,8 @@ class TestForbidBlockInjection:
         assert "禁止读取" in block
         assert "reads:" in block
 
-    def test_dispatch_injects_block_and_keeps_original(self):
+    def test_dispatch_injects_block_and_keeps_original(self, monkeypatch):
+        monkeypatch.setattr(mod, "ALLOWED_MODELS", frozenset({"vendor/model-a"}))
         with tempfile.TemporaryDirectory() as td:
             prompt_file = Path(td) / "prompt-src.txt"
             original = "评审任务：检查实现。\n"
@@ -1825,7 +1844,7 @@ class TestForbidBlockInjection:
             class FakeArgs:
                 pass
             args = FakeArgs()
-            args.worker = [f"{prompt_file}|xiaomi/mimo-v2.5|r1"]
+            args.worker = [f"{prompt_file}|vendor/model-a|r1"]
             args.output_dir = str(out_dir)
             args.output_pattern = "{label}.md"
             args.stagger = 0
@@ -1857,7 +1876,8 @@ class TestForbidBlockInjection:
             assert "禁止读取" in content
             assert "reads:" in content
 
-    def test_dispatch_without_forbid_paths_no_block(self):
+    def test_dispatch_without_forbid_paths_no_block(self, monkeypatch):
+        monkeypatch.setattr(mod, "ALLOWED_MODELS", frozenset({"vendor/model-a"}))
         with tempfile.TemporaryDirectory() as td:
             prompt_file = Path(td) / "prompt-src.txt"
             original = "执行任务。\n"
@@ -1867,7 +1887,7 @@ class TestForbidBlockInjection:
             class FakeArgs:
                 pass
             args = FakeArgs()
-            args.worker = [f"{prompt_file}|xiaomi/mimo-v2.5|r1"]
+            args.worker = [f"{prompt_file}|vendor/model-a|r1"]
             args.output_dir = str(out_dir)
             args.output_pattern = "{label}.md"
             args.stagger = 0

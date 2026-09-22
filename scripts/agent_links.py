@@ -124,12 +124,11 @@ def repair_target(source: Path, target: Path, mode: str, force: bool) -> None:
         if target.exists() and file_md5(target) == file_md5(source):
             return
 
-    if target.exists() and not force:
-        if file_md5(target) != file_md5(source):
-            raise SystemExit(
-                f"{target.name} content differs from {source.name}; "
-                f"rerun with --force only after review"
-            )
+    if target.exists() and file_md5(target) != file_md5(source):
+        print(
+            f"note: overwriting {target.name} (content differs from {source.name}; "
+            f"derived files are rebuilt from the source by design)"
+        )
 
     if target.exists():
         target.unlink()
@@ -235,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite differing target content after manual review.",
+        help="Deprecated no-op kept for compatibility; repair overwrites derived targets by design.",
     )
     repair.set_defaults(func=command_repair)
 

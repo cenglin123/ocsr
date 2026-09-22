@@ -362,7 +362,6 @@ def _check_birth_record() -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     found = False
     for candidate in [
-        "docs/plans/completed/initialization.md",
         "docs/initialization.md",
     ]:
         if _exists(candidate):
@@ -377,7 +376,7 @@ def _check_birth_record() -> list[dict[str, Any]]:
         results.append({
             "kind": "birth_record",
             "status": "missing",
-            "path": "docs/plans/completed/initialization.md or docs/initialization.md",
+            "path": "docs/initialization.md",
         })
     return results
 

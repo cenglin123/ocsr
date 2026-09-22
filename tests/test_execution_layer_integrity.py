@@ -51,7 +51,7 @@ def _worker(td: Path, name: str, *, marker: str | None = None, log: str = "",
     out = td / f"{name}.md"
     if artifact is not None:
         out.write_text(artifact, encoding="utf-8")
-    return {"output": out, "label": name, "model": "xiaomi/mimo-v2.5",
+    return {"output": out, "label": name, "model": "vendor/model",
             "prompt_size_bytes": 10, "work_dir": wd}
 
 
