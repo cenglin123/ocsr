@@ -215,16 +215,37 @@ class TestPidCaptureAndKill:
 
     历史缺陷：`_kill_worker` 按 `WINDOWTITLE eq ocsr-*<label>*` 过滤，
     但代码从未设置过 pwsh 的窗口标题（`--title` 是 opencode 会话标题），
-    且 launcher 以 `-WindowStyle Hidden` 启动（隐藏进程窗口标题为 N/A）——
+    且（旧实现）launcher 以 `-WindowStyle Hidden` 启动（隐藏进程窗口标题为 N/A）——
     过滤器匹配不到任何进程，函数又无条件 return True，调用点也不检查返回值。
     """
 
-    def test_launch_command_captures_pid(self):
+    def test_launch_worker_captures_pid_windowlessly(self):
         with tempfile.TemporaryDirectory() as t:
-            cmd = mod._launch_command(Path(t))
-            assert "-PassThru" in cmd
-            assert mod.PID_FILE_NAME in cmd
-            assert "$proc.Id" in cmd
+            wd = Path(t)
+            captured: dict = {}
+
+            class _FakeProc:
+                pid = 4242
+
+            def fake_popen(args, **kw):
+                captured["args"] = args
+                captured["kw"] = kw
+                return _FakeProc()
+
+            with mock.patch.object(mod.subprocess, "Popen", fake_popen):
+                pid = mod._launch_worker(wd)
+
+            assert pid == 4242
+            assert (wd / mod.PID_FILE_NAME).read_text(encoding="ascii").strip() == "4242"
+            assert captured["args"][-1].endswith("launcher.ps1")
+            assert captured["kw"]["close_fds"] is True
+            assert captured["kw"]["stdin"] == mod.subprocess.DEVNULL
+            # 回归：必须无窗口（不分配 console）且脱管——不得再用 Start-Process（它会新建
+            # console 窗口并抢键盘焦点；ProcessStartInfo 无 redirect 又会继承句柄阻塞调用方）
+            if mod.sys.platform == "win32":
+                flags = captured["kw"]["creationflags"]
+                assert flags & mod.subprocess.CREATE_NO_WINDOW
+                assert not (flags & mod.subprocess.DETACHED_PROCESS)
 
     def test_kill_uses_pid_not_window_title(self):
         with tempfile.TemporaryDirectory() as t:
@@ -375,7 +396,7 @@ class TestDbLockRecoveryHandoff:
 
             def spy(argv, **kw):
                 if (isinstance(argv, list) and argv
-                        and "Start-Process" in str(argv[-1])):
+                        and "launcher.ps1" in str(argv[-1])):
                     cmds.append(str(argv[-1]))
                 return None
 
@@ -391,7 +412,7 @@ class TestDbLockRecoveryHandoff:
             relaunches: list[object] = []
 
             def spy(argv, **kw):
-                if isinstance(argv, list) and argv and "Start-Process" in str(argv[-1]):
+                if isinstance(argv, list) and argv and "launcher.ps1" in str(argv[-1]):
                     relaunches.append(argv)
                     # 若 watcher 错误重派，持续写回 DB 锁现场以暴露无限重派
                     (wd / "start.marker").write_text("exit=1\n", encoding="utf-8")
