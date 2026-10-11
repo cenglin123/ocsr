@@ -99,9 +99,9 @@ session 恢复由上层作为新的、显式授权的 invocation 发起：沿用
    # launcher.ps1
    $prompt = Get-Content "$PSScriptRoot\prompt.txt" -Raw -Encoding UTF8
     opencode run $prompt -m <qualified-id> --title reviewer-r1 *> "$PSScriptRoot\run.log"
-    # 可用模型以仓库根目录 config/allowed-models.json 为准
+    # 可用模型以 ~/.ocsr/allowed-models.json 为准（技能目录之外）
    ```
-2. 用 `Start-Process` 完全脱离 harness 生命周期启动（`-WindowStyle Hidden` 不弹窗）：
+2. 用**无窗口**方式启动（`subprocess.Popen` + `CREATE_NO_WINDOW` + `stdio=DEVNULL`/`close_fds`）；**勿用** `Start-Process ... -WindowStyle Hidden`——它走 ShellExecute 会**先建 console 再隐藏**，仍会闪一下并抢键盘焦点：
    ```powershell
    Start-Process pwsh -ArgumentList "-NoProfile","-File","C:\path\launcher.ps1" -WindowStyle Hidden
    ```
@@ -177,7 +177,7 @@ wait
 # 基本：positional message
 opencode run "你的 prompt 内容"
 
-# 指定模型（须在 config/allowed-models.json 中）
+# 指定模型（须在 ~/.ocsr/allowed-models.json 中）
 opencode run "你的 prompt" -m <qualified-id>
 
 # 常用附加参数

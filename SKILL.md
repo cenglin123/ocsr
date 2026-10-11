@@ -19,7 +19,7 @@ OCSR（OpenCode Subagents Run）以 headless `opencode run` 派发可选模型�
 
 ### 1. 固定模型、调用上限与路径
 
-可用 qualified ID 由用户本地的 [`config/allowed-models.json`](config/allowed-models.json) 唯一决定。该文件**不入库**（模型池随机器与时间变化，每台机器各自维护）；文件缺失或为空即「未配置」，此时**首次使用前先询问用户**要启用哪些模型——先运行 `opencode models --verbose` 看本地实际有哪些模型，把结果展示给用户并征求选定清单，从模型块标题原样复制 qualified ID 写入该文件后再派发；文件非空则直接使用，不再询问。它必须是无重复、无首尾空白的 `provider/model` 字符串数组，格式错误会 fail-closed。修改该 JSON 后重新启动命令即可加载；`selftest` 未传 `--model` 时使用配置首项（未配置时拒绝启动）。禁止凭 `id`、`providerID`、`name` 或裸名拼接 `-m`。换机或通道异常归因后，重新运行 `opencode models --verbose` 核对并手动维护该文件。派发前用 `python scripts/ocsr_dispatch.py preflight --model <qualified-id>` 验证选定模型可用性（会消耗真实模型调用）。模型角色与成本资料见 [`refs/model-defaults.md`](refs/model-defaults.md)。价格元数据（包括 `cost=0`）只是启发式风险信号，元数据可能缺失，不能单独证明模型能力或免费。
+可用 qualified ID 由用户本地、**技能目录之外**的 `~/.ocsr/allowed-models.json` 唯一决定（cc-switch 更新技能会重建技能目录，故白名单不放技能内）。该文件**不入库**（模型池随机器与时间变化，每台机器各自维护）；文件缺失或为空即「未配置」，此时**首次使用前先询问用户**要启用哪些模型——先运行 `opencode models --verbose` 看本地实际有哪些模型，把结果展示给用户并征求选定清单，从模型块标题原样复制 qualified ID 写入该文件后再派发；文件非空则直接使用，不再询问。它必须是无重复、无首尾空白的 `provider/model` 字符串数组，格式错误会 fail-closed。修改该 JSON 后重新启动命令即可加载；`selftest` 未传 `--model` 时使用配置首项（未配置时拒绝启动）。禁止凭 `id`、`providerID`、`name` 或裸名拼接 `-m`。换机或通道异常归因后，重新运行 `opencode models --verbose` 核对并手动维护该文件。派发前用 `python scripts/ocsr_dispatch.py preflight --model <qualified-id>` 验证选定模型可用性（会消耗真实模型调用）。模型角色与成本资料见 [`refs/model-defaults.md`](refs/model-defaults.md)。价格元数据（包括 `cost=0`）只是启发式风险信号，元数据可能缺失，不能单独证明模型能力或免费。
 
 派发前向用户披露模型与调用总上限；未经新鲜授权不突破该上限。每个 worker 最多 **3 次总尝试**。有副作用但不能证明幂等性的任务，**禁止自动重派**。
 
