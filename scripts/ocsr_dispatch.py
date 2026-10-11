@@ -150,8 +150,12 @@ _USER_HOME = str(Path.home())
 _USER_HOME_FORWARD = _USER_HOME.replace("\\", "/")
 
 # ─── 模型白名单 ───────────────────────────────────────────────────────
-# 用户本地维护（不入库）。OCSR_ALLOWED_MODELS_PATH 可覆盖配置文件路径（测试/多套配置）。
-DEFAULT_ALLOWED_MODELS_PATH = Path(__file__).resolve().parents[1] / "config" / "allowed-models.json"
+# 用户本地维护，**放技能目录之外**（cc-switch 更新技能会重建技能目录，目录内 gitignore
+# 配置会被清掉）。默认位置跟随 zhihu-auto 的 `~/.<skill>/` 约定：`~/.ocsr/allowed-models.json`。
+# 覆盖优先级（左优先）：
+#   OCSR_ALLOWED_MODELS_PATH > OCSR_HOME/allowed-models.json > ~/.ocsr/allowed-models.json
+OCSR_HOME = Path(os.environ.get("OCSR_HOME") or (Path.home() / ".ocsr"))
+DEFAULT_ALLOWED_MODELS_PATH = OCSR_HOME / "allowed-models.json"
 ALLOWED_MODELS_PATH = Path(
     os.environ.get("OCSR_ALLOWED_MODELS_PATH") or DEFAULT_ALLOWED_MODELS_PATH
 )
