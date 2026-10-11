@@ -331,18 +331,48 @@ def _write_utf8(path: Path, content: str) -> None:
 PID_FILE_NAME = "pid.txt"
 
 
-def _launch_command(wd: Path) -> str:
-    """生成拉起 worker 的 PowerShell 命令：`-PassThru` 捕获 PID 并写入 <wd>/pid.txt。
+def _spawn_windowless(args: list[str]) -> subprocess.Popen:
+    """以**不分配 console 窗口 + 不继承父进程句柄**的方式启动进程（Windows 关键）。
+
+    为什么弃用 `Start-Process`：
+    - `Start-Process pwsh ... -WindowStyle Hidden` 走 ShellExecute，会**先创建一个 console
+      窗口再隐藏**（实测该进程 `GetConsoleWindow() != 0`）——那一瞬会闪一下并**夺取前台
+      键盘焦点**，打断正在输入的用户；launcher 内的 `opencode`/`node` 还会继承/再建 console，
+      导致一次派发连续闪烁。
+    - `CREATE_NO_WINDOW` 让子进程**根本不分配 console**（实测 `GetConsoleWindow() == 0`），
+      后代随之无窗口。
+
+    为什么 stdio 指向 DEVNULL 且 `close_fds=True`：
+    - 若子进程继承父进程的 stdout/stderr 句柄，它会持住调用方（python `capture_output`）的
+      管道写端，使调用方直到子进程结束才 EOF——实测把 `subprocess.run` 阻塞 12.5s（≈ 子进程
+      全程），破坏"脱管启动"语义。指向 DEVNULL + `close_fds=True` 即断开继承。
+
+    为什么**不**加 `DETACHED_PROCESS`：实测该标志使子进程 stdio 管道失效
+    （`capture_output` 读回空串）、且 launcher 内的 `opencode` 管道不再工作（run.log 0 字节）。
+    worker 由 dispatcher 的 `--watch` 期间持有，无需真正的进程级脱管。
+    """
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    return subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=flags,
+    )
+
+
+def _launch_worker(wd: Path) -> int:
+    """**无窗口、脱管**启动 `pwsh -File <wd>/launcher.ps1`，把子进程 PID 写入
+    `<wd>/pid.txt` 并返回该 PID。
 
     看门狗只接受这里捕获的真实 PID；watcher 自身不负责恢复或再次拉起 worker。
     """
-    p = wd.as_posix()
-    return (
-        f'$proc = Start-Process pwsh -ArgumentList '
-        f'"-NoProfile","-ExecutionPolicy","Bypass","-File","{p}/launcher.ps1" '
-        f'-WindowStyle Hidden -PassThru; '
-        f'Set-Content -Path "{p}/{PID_FILE_NAME}" -Value $proc.Id -Encoding ascii'
+    proc = _spawn_windowless(
+        ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wd / "launcher.ps1")]
     )
+    (wd / PID_FILE_NAME).write_text(f"{proc.pid}\n", encoding="ascii")
+    return proc.pid
 
 
 def _read_pid(wd: Path) -> int | None:
@@ -1290,24 +1320,11 @@ def _dispatch_batch(
             if progress:
                 print(f"[ocsr] 等待 {stagger}s（错峰启动）...")
             time.sleep(stagger)
-        cmd = _launch_command(wd)
         try:
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", cmd],
-                capture_output=True, text=True, timeout=30,
-            )
-            if proc.returncode != 0:
-                _append_telemetry(parsed[i]["model"], _normalize_role(role), "detached", "error", 0, 0,
-                                  f"powershell Start-Process failed: {proc.stderr[:200]}",
-                                  prompt_size_bytes=parsed[i].get("prompt_size_bytes", 0),
-                                  task_id=task_id, label=parsed[i]["label"],
-                                  plan_ref=plan_ref,
-                                  scope=scope, blocking_chain=blocking_chain)
-                if progress:
-                    print(f"⚠️ [{parsed[i]['label']}] Start-Process 返回非零: {proc.stderr[:200]}", file=sys.stderr)
-        except subprocess.TimeoutExpired:
+            _launch_worker(wd)
+        except OSError as exc:
             _append_telemetry(parsed[i]["model"], _normalize_role(role), "detached", "error", 0, 0,
-                              "powershell Start-Process timed out",
+                              f"worker 启动失败: {exc}",
                               prompt_size_bytes=parsed[i].get("prompt_size_bytes", 0),
                               task_id=task_id, label=parsed[i]["label"],
                               plan_ref=plan_ref,
@@ -1491,11 +1508,11 @@ def _kill_worker(label: str, wd: Path) -> bool:
 
     历史缺陷（2026-08-09 审计）：旧实现按 `WINDOWTITLE eq ocsr-*<label>*` 过滤，
     但代码从未设置过 pwsh 的窗口标题——`--title` 是传给 opencode 的**会话标题**，
-    且 launcher 以 `-WindowStyle Hidden` 启动，隐藏进程在 tasklist 中窗口标题为 N/A。
+    且 launcher 以无窗口方式（`CreateNoWindow`）启动，进程在 tasklist 中窗口标题为 N/A。
     过滤器匹配不到任何进程，且函数无条件 return True，调用点也不检查返回值：
     看门狗「到期 kill」这条止损纪律在驱动器里实为空操作。
 
-    现按 `_launch_command` 捕获的真实 PID 终止，校验 taskkill 退出码，并轮询
+    现按 `_launch_worker` 捕获的真实 PID 终止，校验 taskkill 退出码，并轮询
     Windows 进程表确认根 PID 与终止前捕获的所有后代都消失。身份不一致、PID
     复用、残留后代或进程表不可读均 fail-closed。
     `/T` 连带终止子进程（launcher pwsh → opencode）；只杀目标 PID，
@@ -2069,11 +2086,10 @@ def cmd_selftest(args) -> int:
     launcher = _pwsh_code(f"-m {model} --title ocsr-selftest")
     _write_utf8(worker_dir / "launcher.ps1", launcher)
 
-    cmd = f'Start-Process pwsh -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","{worker_dir.as_posix()}/launcher.ps1" -WindowStyle Hidden'
     try:
-        subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, timeout=30)
-    except subprocess.TimeoutExpired:
-        print("[selftest] ⚠️ Start-Process 超时")
+        _launch_worker(worker_dir)
+    except OSError as exc:
+        print(f"[selftest] 启动失败: {exc}")
 
     start = time.time()
     while time.time() - start < 60:
@@ -2734,13 +2750,9 @@ def cmd_preflight(args) -> int:
         model_arg = f'-m {model} --title "ocsr-preflight"'
         launcher = _pwsh_code(model_arg)
         _write_utf8(wd / "launcher.ps1", launcher)
-        cmd = (f'Start-Process pwsh -ArgumentList '
-               f'\"-NoProfile\",\"-ExecutionPolicy\",\"Bypass\",\"-File\",\"{wd.as_posix()}/launcher.ps1\" '
-               f'-WindowStyle Hidden')
         try:
-            subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
-                           capture_output=True, timeout=30)
-        except subprocess.TimeoutExpired:
+            _launch_worker(wd)
+        except OSError:
             pass
         deadline = time.time() + timeout_sec
         exit_code = None
