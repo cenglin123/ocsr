@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-10-18
+
+### worker 改用私有服务器（opencode run --standalone）
+
+#### 变更内容
+- launcher 与 resume_argv 加 --standalone：默认连接的常驻后台服务为每个工作目录常驻 MCP 子进程且不随 run 释放，派发目录（尤其 git worktree）无法删除、进程逐次累积；首个 run 还会自行拉起常驻服务。测试断言 launcher 与续接参数含 --standalone。
+
+#### 迁移影响
+- 无配置变更；已残留的 MCP 进程需 opencode service restart 释放。
+
+---
+
 ## 2026-09-22
 
 - **模型白名单本地化**：`config/allowed-models.json` 排除 git（`.gitignore` + 解除跟踪），每台机器各自维护。文件缺失/为空 = 未配置：首次使用前询问用户启用哪些模型（`opencode models --verbose` 展示 → 征求 → 写入）；非空直接使用。非法格式仍 fail-closed。加载器支持 `OCSR_ALLOWED_MODELS_PATH` 覆盖配置路径（测试/多套配置）。npm 包不再携带 `config/`。

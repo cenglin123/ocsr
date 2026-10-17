@@ -276,6 +276,9 @@ def _pwsh_code(text: str) -> str:
     ``session-binding.json`` 只在同一次 ``opencode run --format json`` 的顶层
     ``sessionID`` 唯一时存在。缺失或歧义只禁止后续 resume，不改变本次
     ``opencode`` 的真实退出码；watcher 不会查询 SQLite 或猜测目录中的“最新 session”。
+
+    ``--standalone``：每个 worker 用私有服务器。默认会连接（必要时拉起）常驻后台服务，
+    服务按工作目录常驻 MCP 子进程且不随 run 结束释放，worker 目录因此被占用、无法删除。
     """
     command_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return textwrap.dedent(f"""\
@@ -294,7 +297,7 @@ def _pwsh_code(text: str) -> str:
         try {{
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
           $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
-          & opencode run $prompt --format json {text} 2>&1 | ForEach-Object {{
+          & opencode run $prompt --format json --standalone {text} 2>&1 | ForEach-Object {{
             $line = [string]$_
             $line | Add-Content "$PSScriptRoot/run.log" -Encoding UTF8
             try {{
@@ -712,7 +715,7 @@ def _write_resume_material(
         "expected_output": str(p["output"]),
         "resume_argv": (
             [
-                "opencode", "run", "<RESUME_PROMPT>", "--format", "json",
+                "opencode", "run", "<RESUME_PROMPT>", "--format", "json", "--standalone",
                 "--session", session_id, "-m", p["model"],
                 "--dir", str(p.get("execution_dir") or Path.cwd()),
             ] if eligible else []
