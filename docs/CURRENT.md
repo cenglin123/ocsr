@@ -1,9 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-09-22
+更新时间：2026-10-18
 
 ## 当前状态
 
+- 2026-10-18 worker 改用 `opencode run --standalone`（launcher 与 resume_argv）：常驻后台服务按目录残留 MCP 子进程、占住派发目录的问题见 `docs/pitfalls.md`「opencode 常驻后台服务」。实测：默认方式跑过的目录删不掉、standalone 可删；三个 standalone 并行正常；standalone 会话可续接；真实派发 30 秒内退出、无残留。302 passed、verify 13 项全过。
 - 2026-09-22 综合深度审计修复已落地（计划 `docs/plans/active/20260922-allowlist-untrack-and-audit-fixes.md`）：① **模型白名单本地化**——`config/allowed-models.json` 排除 git、用户本地维护，缺失/为空即未配置、首次使用询问用户（SKILL.md §1、`refs/model-defaults.md`），加载器支持 `OCSR_ALLOWED_MODELS_PATH` 覆盖；② 测试全部改合成/注入配置，不依赖本机白名单；③ 修复 dsh 工具面 `spawn(process.execPath)` 用 node 跑 Python 的致命 bug（改 `OCSR_PYTHON`/`python`）；④ 工具层错误码 `4`/`5` 与 driver 退出码契约 `0/1/2/3` 脱钩（`refs/dsh-integration.md` §工具层错误码）；⑤ `agent_links.py repair` 覆盖派生文件不再要求 `--force`；⑥ 清理：删除已完成 active 计划、修复死链、路径占位化、刷新基线数字。
 - 2026-09-11 看门狗超时与 Session 恢复已落地（计划 20260911-ocsr-watchdog-session-recovery，已执行）：检查期限与不可变总期限分离、有限续期（默认 1 次）、worker 单向状态机（`worker-state.json`）、`artifact_seen` 与 `landed` 分离、launcher 流式绑定唯一 `sessionID`（`session-binding.json`，缺失/歧义只禁用续接）、恢复材料 `resume-material.json`（`old_process_stop_verified` + `requires_settle`；恢复由上层以新 reserve/settle 显式发起，watcher 不自行重派）；DB 锁改为 `recovery_required` 停止，不再自动重试。专题文档与遥测模板已同步（`refs/dispatch-patterns.md`）。
 - 2026-09-06 与 pisr 同步的两项规则对齐：① 模型选择——默认白名单仅为作者本机模型池样例，每台机器首次使用前（及换机、通道异常归因后）先 `opencode models --verbose` 按本地池重配 `config/allowed-models.json` 再决定模型；② 评审合同——fresh 评审闭环补运行时验证合同，reviewer 以只读命令佐证时 prompt 须钉死禁止写入与修复、报告列明命令与退出码（OCSR 无进程级白名单，命令只读性属事后审计面；需进程级硬约束走 PISR）。

@@ -440,6 +440,8 @@ class TestWatchdogSessionRecovery:
     def test_launcher_uses_json_and_binds_only_unique_session(self):
         launcher = mod._pwsh_code("-m vendor/model --title worker")
         assert "opencode run $prompt --format json" in launcher
+        # 私有服务器：不连常驻后台服务，MCP 子进程随 run 退出，worker 目录可删除
+        assert "--standalone" in launcher
         assert "sessionID" in launcher
         assert "$sessionIDs.Count -ne 1" in launcher
         assert mod.SESSION_BINDING_FILE in launcher
@@ -635,6 +637,7 @@ class TestWatchdogSessionRecovery:
         assert material["requires_settle"] is True
         assert material["next_attempt_index"] == 2
         assert material["resume_argv"][material["resume_argv"].index("--session") + 1] == "session-1"
+        assert "--standalone" in material["resume_argv"]
         assert mod._write_resume_material(
             p, old_process_stop_verified=False, recovery_safe=True,
             attempt_index=1, converge_invocation_id="inv-1",

@@ -21,6 +21,10 @@ PowerShell 5.1、PowerShell 7、终端显示和文件字节是不同层。先以
 
 harness 前台超时不足、后台通道 kill、模型端静默停滞的具名故障模式与止损协议（脱管派发、看门狗硬阈值、失败切换阶梯）见 [`refs/dispatch-patterns.md`](../refs/dispatch-patterns.md) 的“失败看护与切换”与“脱管派发模式”——本文件不重复正文。
 
+## opencode 常驻后台服务
+
+opencode 2.x 的 `opencode run` 默认连接常驻后台服务（`opencode-cli serve --service`，桌面版启动或首个 run 拉起），服务为每个新工作目录常驻一对 MCP 子进程（配置里的 Playwright、cua 等），run 结束后不释放；派发目录因此被占用、无法删除（git worktree 任务目录尤其明显），且每派发一个新目录多一对进程。launcher 因此一律加 `--standalone`（私有服务器，随 run 退出；会话仍可用 `--session` 续接）。已残留的进程要 `opencode service restart` 或退出桌面版后结束服务才释放。
+
 ## 上层流程对齐
 
 OCSR 自身不维护独立 converge 轮次。当上层是 converge 时，旁路 spawn、inline reviewer 或未进入 ledger 的调用都会破坏审计完整性。
