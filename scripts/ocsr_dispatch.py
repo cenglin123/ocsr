@@ -146,7 +146,6 @@ TELEMETRY_FIELDS: dict[str, str] = {
     "resume_eligible": "optional",
     "resumed_from": "optional",
     "resume_session": "optional",
-    "resume_session_returned": "optional",
 }
 
 # 字节→token 近似系数（英文约 4 bytes/token，中文约 2-3 bytes/token）
@@ -1069,7 +1068,7 @@ def _append_telemetry(
     if resume_eligible is not None:
         row["resume_eligible"] = resume_eligible
     if resumed_from:
-        row["resumed_from"] = resumed_from
+        row["resumed_from"] = _sanitize_path(resumed_from)
     if resume_session:
         row["resume_session"] = resume_session
     DISPATCH_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -1496,6 +1495,18 @@ def _dispatch_batch(
                               scope=scope, blocking_chain=blocking_chain,
                               **_resume_row_fields(parsed[i]))
         start_times.append(time.time())
+        # 启动即落 attempt_index：非 --watch 路径不进入 _watch_loop，若只在那里写，
+        # 后续 --resume-from 会看不到本次尝试序号而绕过三次总上限。
+        _write_worker_state(wd, {
+            "state": "launched",
+            "label": parsed[i]["label"],
+            "inspection_deadline": start_times[i] + timeout_min * 60,
+            "total_deadline": start_times[i] + total_timeout_min * 60,
+            "renewal_count": 0,
+            "max_renewals": max_renewals,
+            "attempt_index": attempt_index,
+            "artifact_state": "missing",
+        })
         # 注：这行父进程写入是既有行为，本次拆分**刻意保持不变**。
         # 删除它是 20260809 计划 Phase 2 的 B7 项（marker 应仅由 launcher 产生），
         # 那是独立的行为变更、需走自己的评审，不在本次机械拆分范围内 ——
@@ -1640,8 +1651,9 @@ def cmd_dispatch(args) -> int:
             print(f"❌ 续接必须沿用原派发模型：原 {resume_ctx['model']}，"
                   f"本次 {parsed[0]['model']}；换模型请新开", file=sys.stderr)
             return 1
+        process_table = _query_process_table()
         process_status = _resume_process_status(
-            resume_ctx["pid"], resume_ctx["creation_time"], _query_process_table())
+            resume_ctx["pid"], resume_ctx["creation_time"], process_table)
         if process_status == "running":
             print("❌ 原 worker 进程仍在运行，拒绝续接；请等待其退出或先终止",
                   file=sys.stderr)
@@ -1650,18 +1662,25 @@ def cmd_dispatch(args) -> int:
             print("❌ 无法确认原 worker 进程已退出（进程表不可读或身份缺失），拒绝续接",
                   file=sys.stderr)
             return 1
+        descendants = sorted(_descendant_pids(resume_ctx["pid"], process_table))
+        if descendants:
+            print(f"❌ 原 worker 仍有存活后代进程 {descendants}"
+                  f"（可能为 opencode 残留），拒绝续接；请先清理后再试", file=sys.stderr)
+            return 1
         original_attempt = resume_ctx.get("attempt_index")
         if requested_attempt is None:
-            attempt_index = (original_attempt + 1) if original_attempt is not None else 1
+            if original_attempt is None:
+                print("❌ 原目录未记录 attempt_index，拒绝续接；"
+                      "请显式传 --attempt-index <新序号>（仍受三次总上限约束）",
+                      file=sys.stderr)
+                return 1
+            attempt_index = original_attempt + 1
         else:
             attempt_index = requested_attempt
         if original_attempt is not None and attempt_index <= original_attempt:
             print(f"❌ 续接必须记为同一任务的新一次尝试："
                   f"原 attempt_index={original_attempt}，本次 {attempt_index}", file=sys.stderr)
             return 1
-        if original_attempt is None and requested_attempt is None:
-            print("⚠️ 原目录未记录 attempt_index，按第 1 次尝试记账；"
-                  "上层仍须遵守同一任务三次总尝试上限", file=sys.stderr)
         if not 1 <= attempt_index <= MAX_ATTEMPTS:
             print(f"❌ 三次总尝试上限已到（原 attempt_index={original_attempt}），"
                   f"停止续接或新开任务", file=sys.stderr)
@@ -3045,13 +3064,15 @@ def main():
     p_disp.add_argument("--max-renewals", type=int, default=DEFAULT_MAX_RENEWALS,
                         help=f"检查期限的最大续期次数（默认 {DEFAULT_MAX_RENEWALS}）")
     p_disp.add_argument("--attempt-index", type=int, choices=range(1, MAX_ATTEMPTS + 1), default=None,
-                        help="同一任务的总尝试序号（1..3）；默认 1，--resume-from 时默认原次数 + 1")
+                        help="同一任务的总尝试序号（1..3）；默认 1，--resume-from 时默认原次数 + 1。"
+                             "原目录无 attempt_index 时必须显式指定")
     p_disp.add_argument("--recovery-safe", action="store_true",
                         help="声明 worker 无副作用或已证明幂等；仅影响是否生成可用恢复材料")
     p_disp.add_argument("--resume-from", metavar="WORKER_DIR",
                         help="接续原 worker 会话（返工）：传入含 session-binding.json 与 "
                              "process-identity.json 的 <work-dir>/ocsr_dispatch_*/<label>/ 目录。"
-                             "只允许单个 --worker，模型须与原派发一致，旧进程须已退出")
+                             "只允许单个 --worker，模型须与原派发一致，旧进程及其后代须已退出。"
+                             "sessionID 回读与变更提示仅在 --watch 路径执行")
     p_disp.add_argument("--timeout-policy", choices=sorted(TIMEOUT_POLICY_VALUES),
                         default=TIMEOUT_POLICY_AUTO,
                         help=f"超时行为策略: {TIMEOUT_POLICY_AUTO}=按角色自动解析（默认），"

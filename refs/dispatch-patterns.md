@@ -66,7 +66,7 @@
 - **层级上报**（`reported`）：进程保留，仅作为交回上层裁决的显式状态，watcher 不删除跟踪、不并发重派。
 - **终止**（`stopped`/`timed_out`）：总期限到达后必须终止或交回上层。
 
-总期限为 `timeout × (max_renewals + 1)`，写入 `worker-state.json` 后不可变；worker 状态单向推进 `running → inspection_due → renewed | reported | terminating → stopped | timed_out | landed`。日志字节增长本身不构成有效进展；无法证明状态时进入 `reported`/`timed_out`，不得并发重派。
+总期限为 `timeout × (max_renewals + 1)`，写入 `worker-state.json` 后不可变；worker 状态单向推进 `launched → running → inspection_due → renewed | reported | terminating → stopped | timed_out | landed`。日志字节增长本身不构成有效进展；无法证明状态时进入 `reported`/`timed_out`，不得并发重派。
 
 完成判定要求终止证据与产物验收同时成立：期望产物存在、非 0 字节（预存文件还须内容变化）且抽样验收通过。产物先出现而进程仍活跃时只记 `artifact_seen` 并继续看护；产物出现后进程非零退出仍按确定性失败处理。
 
@@ -171,7 +171,7 @@ worker 已正常完成、上层按验收清单要求具体修复时，用 `dispa
 
 - worker 已正常完成并落盘，本轮是按其产物与验收清单做具体修复。
 - 上下文未被压缩，且原 session 绑定可用（`session-binding.json` 有唯一 `session_id`）。
-- 旧 worker 进程及其身份已确认退出（PID 不存在，或 PID 已被复用）。
+- 旧 worker 进程及其身份已确认退出（PID 不存在，或 PID 已被复用），且进程表中没有仍以该 PID 为父的后代（避免 opencode 子进程残留）。
 - 工作目录未被他人改动；若已改动，先说明现状，避免 worker 按旧上下文覆盖。
 
 ### 何时新开
@@ -198,7 +198,7 @@ python scripts/ocsr_dispatch.py dispatch `
   --output-dir <dir> --output-pattern R1-fix.md --watch
 ```
 
-驱动器会校验：只允许单个 worker；原派发模型与本次 `--worker` 模型一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 可用；旧 PID 与创建时间确认已退出（PID 复用视为已退出，无法确认则拒绝）。通过后 launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本记录 `resumed_from`、`resume_session` 与 `attempt_index`。新会话仍写新的 `session-binding.json`；返回的 sessionID 与原 id 不同时照实记录并提示。续接按同一任务的新一次尝试计数：原目录有 `worker-state.json` 时默认 `原 attempt_index + 1`，否则从 1 起记；三次总尝试上限由上层遵守。
+驱动器会校验：只允许单个 worker；原派发模型与本次 `--worker` 模型一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 可用；旧 PID 与创建时间确认已退出（PID 复用视为已退出，无法确认则拒绝），且进程表中没有仍以该 PID 为父的后代（有存活后代则拒绝）。通过后 launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本记录 `resumed_from`、`resume_session` 与 `attempt_index`。新会话仍写新的 `session-binding.json`；返回的 sessionID 与原 id 不同时照实记录并提示——回读与提示只在 `--watch` 路径执行。续接按同一任务的新一次尝试计数：原目录有 `worker-state.json` 时默认 `原 attempt_index + 1`；原目录没有 `attempt_index` 时必须显式传 `--attempt-index <新序号>`，否则拒绝续接；三次总尝试上限由上层遵守。非 `--watch` 派发也会在启动时把 `attempt_index` 写入 `worker-state.json`。
 
 ### 与故障恢复材料的区别
 
@@ -282,7 +282,7 @@ opencode run "$(cat prompts/worker-01.txt)" -m <qualified-id>
   timeout_policy_resolved='<leaf_kill|hierarchical_report>'
   forbid_paths=<n>
   read_audit='<read_audit>'
-  worker_state='<running|inspection_due|renewed|reported|landed|stopped|timed_out>'
+  worker_state='<launched|running|inspection_due|renewed|reported|landed|stopped|timed_out>'
   inspection_deadline=<epoch_seconds>
   total_deadline=<epoch_seconds>
   renewal_count=<n>
@@ -291,8 +291,7 @@ opencode run "$(cat prompts/worker-01.txt)" -m <qualified-id>
   resume_eligible=<$true|$false>
   resumed_from='<original worker dir|>'
   resume_session='<session id|>'
-  resume_session_returned='<session id returned by this run|>'
 } | ConvertTo-Json -Compress | Add-Content "$HOME/.ocsr/dispatch-log.jsonl"
 ```
 
-> 条件字段（`label`、`note`、`timeout_policy_*`、`forbid_paths`、`read_audit`、看门狗状态组、返工续接组）仅在非空或已触发时写入；`worker_state`、期限与续期、session 与恢复组由 `dispatch --watch` 的看护闭环产生，`resumed_from` / `resume_session` 由 `--resume-from` 派发写入，含义见“失败看护与切换”与“接续原会话（返工）”。
+> 条件字段（`label`、`note`、`timeout_policy_*`、`forbid_paths`、`read_audit`、看门狗状态组、返工续接组）仅在非空或已触发时写入；`worker_state` 与期限在启动时先写 `launched`，随后由 `dispatch --watch` 的看护闭环推进；session 与恢复组由看护闭环产生，`resumed_from` / `resume_session` 由 `--resume-from` 派发写入，含义见“失败看护与切换”与“接续原会话（返工）”。

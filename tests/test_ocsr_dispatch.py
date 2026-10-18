@@ -2270,6 +2270,20 @@ class TestResumeFrom:
         assert "session_id 缺失或格式错误" in capsys.readouterr().err
         assert self.launched == []
 
+    @pytest.mark.parametrize("bad_session_id", [
+        "a;calc",
+        "ses with space",
+        'ses"quote',
+        "ses'quote",
+    ])
+    def test_rejects_invalid_session_id_characters(self, tmp_path, capsys,
+                                                   bad_session_id):
+        resume_wd = _make_resume_worker_dir(tmp_path, session_id=bad_session_id)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "session_id 缺失或格式错误" in capsys.readouterr().err
+        assert self.launched == []
+
     def test_rejects_unverifiable_model(self, tmp_path, capsys):
         resume_wd = _make_resume_worker_dir(tmp_path)
         (resume_wd / "launcher.ps1").unlink()
@@ -2296,6 +2310,19 @@ class TestResumeFrom:
         assert "无法确认原 worker 进程已退出" in capsys.readouterr().err
         assert self.launched == []
 
+    def test_rejects_live_descendant_of_old_pid(self, tmp_path, capsys, monkeypatch):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        monkeypatch.setattr(mod, "_query_process_table", lambda: {
+            # 原 launcher PID 已消失，但其 opencode 子进程仍以它为父。
+            9001: {"parent_pid": 4242, "creation_time": "638000000000000002"},
+        })
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        err = capsys.readouterr().err
+        assert "仍有存活后代进程" in err
+        assert "9001" in err
+        assert self.launched == []
+
     def test_pid_reuse_is_treated_as_exited_and_launcher_resumes(
             self, tmp_path, monkeypatch):
         resume_wd = _make_resume_worker_dir(tmp_path)
@@ -2316,6 +2343,31 @@ class TestResumeFrom:
         launched_row = next(r for r in rows if r.get("event") == "launched")
         assert launched_row["resumed_from"].startswith("<user-home>")
         assert launched_row["resume_session"] == "ses_original"
+        assert launched_row["attempt_index"] == 2
+        # 非 --watch 路径也必须在启动时落 attempt_index（三次上限依据）。
+        state = json.loads(
+            (self.launched[0] / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["state"] == "launched"
+        assert state["attempt_index"] == 2
+        assert "total_deadline" in state
+
+    def test_rejects_missing_original_attempt_without_explicit_index(
+            self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path, attempt=None)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "原目录未记录 attempt_index" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_explicit_attempt_index_allowed_when_original_missing(
+            self, tmp_path):
+        resume_wd = _make_resume_worker_dir(tmp_path, attempt=None)
+        args = _resume_dispatch_args(tmp_path, resume_wd, attempt_index=2)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
         assert launched_row["attempt_index"] == 2
 
     def test_rejects_attempt_limit_reached(self, tmp_path, capsys):
@@ -2365,7 +2417,7 @@ class TestResumeFrom:
                 resumed_from=str(tmp_path / "old"), resume_session="ses_original",
             )
             row = json.loads(mod.DISPATCH_LOG.read_text(encoding="utf-8").splitlines()[0])
-            assert row["resumed_from"] == str(tmp_path / "old")
+            assert row["resumed_from"] == mod._sanitize_path(str(tmp_path / "old"))
             assert row["resume_session"] == "ses_original"
         finally:
             mod.DISPATCH_LOG = old
