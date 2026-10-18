@@ -74,7 +74,7 @@
 
 launcher 以 `opencode run --format json` 流式解析顶层 `sessionID`，仅当唯一时写 `<wd>/session-binding.json`（含 session ID、PID、进程创建时间、命令指纹）；缺失或歧义只禁用后续续接，不改变本次 `opencode` 的真实退出码。**禁止**查询同目录 SQLite 或按“最新 session”猜测用于自动恢复。
 
-session 恢复由上层作为新的、显式授权的 invocation 发起：沿用同一任务的 attempt index 与三次总尝试上限，走新的 reserve/settle 记账。驱动器只生成 `<wd>/resume-material.json` 恢复材料，不自行执行；材料仅在 session 绑定可用、旧 PID 及其派生进程均确认消失（`old_process_stop_verified=true`）时可信。PID 复用、残留子进程或确认超时均为未知状态，禁止恢复。
+session 恢复由上层作为新的、显式授权的 invocation 发起：沿用同一任务的 attempt index 与三次总尝试上限，走新的 reserve/settle 记账。驱动器只生成 `<wd>/resume-material.json` 恢复材料，不自行执行；材料仅在 session 绑定可用、旧 PID 及其派生进程均确认消失（`old_process_stop_verified=true`）时可信。PID 复用、残留子进程或确认超时均为未知状态，禁止恢复。返工续接不使用本节的恢复材料，入口与条件见下节「接续原会话（返工）」。
 
 ### 失败切换阶梯
 
@@ -163,11 +163,48 @@ wait
 
 并发纪律：每个 worker 独立日志与独立产物路径，失败定位靠主文件“回收并验收”的文件验证而非解析 stdout；**先派 1 个试点 worker 走通链路，再逐步从 2 个并发上探**；遇 429/超时回退；扇出前向用户报预计调用数上限与所选模型，未经新鲜授权不突破已披露上限，不静默烧钱。
 
-## 多轮续接（版本相关）
+## 接续原会话（返工）
 
-### 多轮续接（版本相关）
+worker 已正常完成、上层按验收清单要求具体修复时，用 `dispatch --resume-from <原 worker 派发目录>` 接续原会话。原 worker 记得自己写过的代码与决策，返工只需给差异清单，通常比新开更省时省 token。默认仍是一次投递、文件回收；续接是返工的显式入口，不是常规多轮对话机制。
 
-`opencode` 有 `--continue` / `--session <id>` / `--fork` 全局会话能力；对 `run` 子命令的支持以本机 `opencode run --help` 实测为准，不作为默认路径。注意：`opencode run --fork` 必须配合 `--continue` 或 `--session`（本机 `opencode run --help` 已确认），且仍是 **CLI 会话 fork**，不是 live 子代理句柄，不能当作上下文继承机制。默认设计成**一次投递、文件回收**，不依赖续接。
+### 何时用
+
+- worker 已正常完成并落盘，本轮是按其产物与验收清单做具体修复。
+- 上下文未被压缩，且原 session 绑定可用（`session-binding.json` 有唯一 `session_id`）。
+- 旧 worker 进程及其身份已确认退出（PID 不存在，或 PID 已被复用）。
+- 工作目录未被他人改动；若已改动，先说明现状，避免 worker 按旧上下文覆盖。
+
+### 何时新开
+
+- 问题源于误解需求或设计，而非局部缺陷。
+- 上下文已压缩，原会话已丢失关键状态。
+- 需要独立视角（例如原 worker 的判断本身要复核）。
+- session 绑定缺失、歧义或身份不一致。
+- 需要换模型：换模型就该新开，禁止在同一任务里用续接换档。
+
+### 返工提示词要点
+
+- 只写返工清单：每条给 `文件:行`、现象、期望结果与验收命令。
+- 要求先重新读取当前文件再改，不凭记忆改旧版本。
+- 要求跑相关测试，并把命令、退出码、产物写到新的绝对路径（不要覆盖上一轮报告）。
+- 说明上一轮产物路径与本次允许改动的范围；其余约束沿用原 prompt。
+
+### 命令
+
+```powershell
+python scripts/ocsr_dispatch.py dispatch `
+  --worker "<返工 prompt>|provider/model|R1-fix" `
+  --resume-from C:\path\to\ocsr_dispatch_...\R1 `
+  --output-dir <dir> --output-pattern R1-fix.md --watch
+```
+
+驱动器会校验：只允许单个 worker；原派发模型与本次 `--worker` 模型一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 可用；旧 PID 与创建时间确认已退出（PID 复用视为已退出，无法确认则拒绝）。通过后 launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本记录 `resumed_from`、`resume_session` 与 `attempt_index`。新会话仍写新的 `session-binding.json`；返回的 sessionID 与原 id 不同时照实记录并提示。续接按同一任务的新一次尝试计数：原目录有 `worker-state.json` 时默认 `原 attempt_index + 1`，否则从 1 起记；三次总尝试上限由上层遵守。
+
+### 与故障恢复材料的区别
+
+`resume-material.json`（见「session 绑定与恢复材料」）只在看门狗超时终止路径生成，服务的是故障恢复：由上层作为新的、显式授权的 invocation 发起，沿用同一 attempt 计数并走 reserve/settle。返工续接是 worker 正常完成后的主动返工入口，不依赖 `resume-material.json`，但同样不得绕过三次总尝试上限与上层预算门。
+
+`opencode run --fork` 仍是 CLI 会话 fork，不是 live 子代理句柄，也不是上下文继承机制；不要用它替代 `--session` 续接。
 
 ## 基本命令与长 prompt 文件处理
 
@@ -252,7 +289,10 @@ opencode run "$(cat prompts/worker-01.txt)" -m <qualified-id>
   session_status='<available|unbound|missing|ambiguous|identity_mismatch>'
   old_process_stop_verified=<$true|$false>
   resume_eligible=<$true|$false>
+  resumed_from='<original worker dir|>'
+  resume_session='<session id|>'
+  resume_session_returned='<session id returned by this run|>'
 } | ConvertTo-Json -Compress | Add-Content "$HOME/.ocsr/dispatch-log.jsonl"
 ```
 
-> 条件字段（`label`、`note`、`timeout_policy_*`、`forbid_paths`、`read_audit`、看门狗状态组）仅在非空或已触发时写入；`worker_state`、期限与续期、session 与恢复组由 `dispatch --watch` 的看护闭环产生，含义见“失败看护与切换”。
+> 条件字段（`label`、`note`、`timeout_policy_*`、`forbid_paths`、`read_audit`、看门狗状态组、返工续接组）仅在非空或已触发时写入；`worker_state`、期限与续期、session 与恢复组由 `dispatch --watch` 的看护闭环产生，`resumed_from` / `resume_session` 由 `--resume-from` 派发写入，含义见“失败看护与切换”与“接续原会话（返工）”。

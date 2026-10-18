@@ -17,7 +17,7 @@ opencode run --help
 python scripts/verify_ocsr_skill.py
 ```
 
-模型可用性和 CLI 参数是实时环境事实。升级 OpenCode 后，应重新验证 `run`、`--dir`、`--continue`、`--session`、`--fork` 和 stdout 编码行为。
+模型可用性和 CLI 参数是实时环境事实。升级 OpenCode 后，应重新验证 `run`、`--dir`、`--continue`、`--session`、`--fork`、stdout 编码行为，以及 `--standalone` + `--session` 的组合续接。
 
 ## 文档体系检查
 

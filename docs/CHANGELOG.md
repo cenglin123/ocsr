@@ -2,6 +2,17 @@
 
 ## 2026-10-18
 
+### 返工可接续原会话（dispatch --resume-from）
+
+#### 变更内容
+- `dispatch` 新增 `--resume-from <原 worker 派发目录>`：worker 正常完成后按验收清单返工时，可接续原会话。只允许单个 worker；原派发模型须与本次一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 须有合法唯一 session ID；旧进程须确认已退出（PID 复用视为已退出，进程表不可读或身份不一致则拒绝）。
+- launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本与遥测记录 `resumed_from`、`resume_session`，账本记录 `attempt_index`。续接默认按原 `attempt_index + 1` 计数，三次总尝试上限不变。
+- 新会话仍写新的 `session-binding.json`；返回的 sessionID 与原 id 不同时照实记录并提示。
+- 文档同步：`docs/overview.md` 第 2 条、`refs/dispatch-patterns.md`「接续原会话（返工）」、`SKILL.md` 入口指针、`docs/deployment.md` 升级复验清单。
+
+#### 迁移影响
+- 无配置变更。默认派发行为不变；仅在显式传 `--resume-from` 时启用续接。
+
 ### worker 改用私有服务器（opencode run --standalone）
 
 #### 变更内容

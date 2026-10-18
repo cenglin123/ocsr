@@ -13,6 +13,11 @@ ocsr_dispatch.py — ocsr (OpenCode Subagents Run) 派发后端（库内执行�
     --output-dir ./evidence \\
     --watch --timeout 15
 
+  # 返工：接续原 worker 会话（只允许单个 worker，模型须一致）
+  python scripts/ocsr_dispatch.py dispatch \\
+    --worker prompt-fix.txt|model-id|R1-fix \\
+    --resume-from <原 worker 派发目录> --watch
+
   # 冒烟测试
   python scripts/ocsr_dispatch.py selftest
 
@@ -139,6 +144,9 @@ TELEMETRY_FIELDS: dict[str, str] = {
     "session_status": "optional",
     "old_process_stop_verified": "optional",
     "resume_eligible": "optional",
+    "resumed_from": "optional",
+    "resume_session": "optional",
+    "resume_session_returned": "optional",
 }
 
 # 字节→token 近似系数（英文约 4 bytes/token，中文约 2-3 bytes/token）
@@ -242,7 +250,7 @@ def _sanitize_path(val: str) -> str:
 
 def _sanitize_ledger_row(row: dict) -> dict:
     """Sanitize path-like string values in a ledger row."""
-    PATH_KEYS = {"prompt_file", "expected_output", "work_dir", "output", "detail"}
+    PATH_KEYS = {"prompt_file", "expected_output", "work_dir", "output", "detail", "resumed_from"}
     result = {}
     for k, v in row.items():
         if isinstance(v, str) and k in PATH_KEYS:
@@ -456,6 +464,109 @@ def _read_session_binding(wd: Path) -> tuple[str, str]:
     ):
         return "identity_mismatch", ""
     return "available", sid
+
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
+
+
+def _read_dispatch_model(wd: Path) -> str:
+    """从原派发目录的 launcher.ps1 读取 ``-m <model>``；读不到返回空串。"""
+    try:
+        text = (wd / "launcher.ps1").read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if "opencode run" not in line:
+            continue
+        match = re.search(r"(?:^|\s)-m\s+(\S+)", line)
+        if match:
+            return match.group(1).strip("\"'")
+    return ""
+
+
+def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
+    """读取并校验原 worker 派发目录，返回 ``(context, error)``。
+
+    只接受同时具备 ``session-binding.json`` 与 ``process-identity.json`` 的目录；
+    任何缺失、格式错误或两份文件身份不一致都 fail-closed。原派发模型从
+    ``launcher.ps1`` 的 ``-m`` 参数核对，无法核对即拒绝。
+    """
+    wd = Path(resume_dir)
+    if not wd.is_dir():
+        return None, f"续接目录不存在: {wd}"
+    binding = _read_json_object(wd / SESSION_BINDING_FILE)
+    if binding is None:
+        return None, "session 绑定不可用，请新开：缺少 session-binding.json 或格式错误"
+    raw_session = binding.get("session_id")
+    session_id = raw_session.strip() if isinstance(raw_session, str) else ""
+    if not session_id or not _SESSION_ID_RE.fullmatch(session_id):
+        return None, "session 绑定不可用，请新开：session_id 缺失或格式错误"
+    identity = _read_json_object(wd / PROCESS_IDENTITY_FILE)
+    if identity is None:
+        return None, "无法确认旧进程已退出：缺少 process-identity.json 或格式错误"
+    binding_pid = binding.get("pid")
+    identity_pid = identity.get("pid")
+    if (
+        not isinstance(binding_pid, int) or isinstance(binding_pid, bool) or binding_pid <= 0
+        or not isinstance(identity_pid, int) or isinstance(identity_pid, bool) or identity_pid <= 0
+    ):
+        return None, "session 绑定不可用，请新开：pid 缺失或格式错误"
+    if binding_pid != identity_pid:
+        return None, "session 绑定不可用，请新开：session-binding 与 process-identity 的 PID 不一致"
+    creation_time = str(identity.get("creation_time") or "").strip()
+    binding_creation = str(binding.get("creation_time") or "").strip()
+    if not creation_time or not binding_creation or creation_time != binding_creation:
+        return None, "无法确认旧进程已退出：进程创建时间缺失或两份文件不一致"
+    fingerprint = str(identity.get("command_fingerprint") or "").strip()
+    binding_fingerprint = str(binding.get("command_fingerprint") or "").strip()
+    if fingerprint and binding_fingerprint and fingerprint != binding_fingerprint:
+        return None, "session 绑定不可用，请新开：命令指纹不一致"
+    model = _read_dispatch_model(wd)
+    if not model:
+        return None, "无法核对原派发模型：launcher.ps1 中找不到 -m，拒绝续接"
+    state = _read_json_object(wd / WORKER_STATE_FILE) or {}
+    raw_attempt = state.get("attempt_index")
+    original_attempt = (
+        raw_attempt
+        if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool)
+        and 1 <= raw_attempt <= MAX_ATTEMPTS
+        else None
+    )
+    return {
+        "work_dir": str(wd),
+        "session_id": session_id,
+        "pid": binding_pid,
+        "creation_time": creation_time,
+        "model": model,
+        "attempt_index": original_attempt,
+    }, ""
+
+
+def _resume_process_status(pid: int, creation_time: str, table: dict[int, dict]) -> str:
+    """``running`` / ``stopped`` / ``pid_reused`` / ``unknown``。
+
+    PID 仍在但创建时间不同视为 PID 复用，即原进程已退出；无法读取进程表
+    或创建时间缺失视为 ``unknown``，调用方必须拒绝。
+    """
+    if not table:
+        return "unknown"
+    row = table.get(pid)
+    if row is None:
+        return "stopped"
+    actual = str(row.get("creation_time") or "").strip()
+    if not actual:
+        return "unknown"
+    return "running" if actual == creation_time else "pid_reused"
+
+
+def _resume_row_fields(p: dict) -> dict[str, object]:
+    """ledger/telemetry 共用的续接来源字段；非续接派发返回空字典。"""
+    if not p.get("resumed_from"):
+        return {}
+    return {
+        "resumed_from": p["resumed_from"],
+        "resume_session": p.get("resume_session", ""),
+    }
 
 
 def _query_process_table() -> dict[int, dict]:
@@ -906,6 +1017,8 @@ def _append_telemetry(
     session_status: str = "",
     old_process_stop_verified: bool | None = None,
     resume_eligible: bool | None = None,
+    resumed_from: str = "",
+    resume_session: str = "",
 ) -> None:
     now_ts = datetime.datetime.now().astimezone().isoformat()
     row = {
@@ -955,6 +1068,10 @@ def _append_telemetry(
         row["old_process_stop_verified"] = old_process_stop_verified
     if resume_eligible is not None:
         row["resume_eligible"] = resume_eligible
+    if resumed_from:
+        row["resumed_from"] = resumed_from
+    if resume_session:
+        row["resume_session"] = resume_session
     DISPATCH_LOG.parent.mkdir(parents=True, exist_ok=True)
     with DISPATCH_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -1021,6 +1138,41 @@ def _append_dispatch_ledger(ledger: Path | None, row: dict) -> None:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"⚠️ 派发账本写入失败 ({ledger}): {e}", file=sys.stderr)
+
+
+def _record_resume_session(parsed: list[dict], ledger: Path | None) -> None:
+    """续接结束后核对实际 sessionID，并如实写入账本与输出。
+
+    新会话由 launcher 自行写 ``session-binding.json``；这里只读取结果。
+    返回的 sessionID 与原 id 不同时不改写绑定，只记录并提示。
+    """
+    if not parsed:
+        return
+    p = parsed[0]
+    original = str(p.get("resume_session") or "")
+    wd = p.get("work_dir")
+    if not original or not wd:
+        return
+    status, returned = _read_session_binding(Path(wd))
+    row: dict[str, object] = {
+        "event": "resume_session",
+        "label": p.get("label", ""),
+        "model": p.get("model", ""),
+        "resumed_from": p.get("resumed_from", ""),
+        "resume_session": original,
+        "resume_session_status": status,
+    }
+    if returned:
+        row["resume_session_returned"] = returned
+        row["resume_session_changed"] = returned != original
+        if returned != original:
+            print(f"[ocsr] ⚠️ 续接返回了新的 sessionID: {returned}（原 {original}）；"
+                  f"已按实际结果写入新的 session-binding.json")
+        else:
+            print(f"[ocsr] 续接沿用原 sessionID: {original}")
+    else:
+        print(f"[ocsr] ⚠️ 续接后未取得唯一 sessionID（{status}），本次不写新的绑定")
+    _append_dispatch_ledger(ledger, row)
 
 
 def _collision_report(
@@ -1220,6 +1372,8 @@ def _dispatch_batch(
     recovery_safe: bool = False,
     attempt_index: int = 1,
     allow_overwrite: list[str] | None = None,
+    resume_from: str = "",
+    resume_session: str = "",
 ) -> int:
     """派发内核：**已解析完毕**的 worker 批次 → 退出码。
 
@@ -1297,6 +1451,9 @@ def _dispatch_batch(
     # 为每个 worker 生成 launcher
     work_dirs: list[Path] = []
     for i, p in enumerate(parsed):
+        if resume_session:
+            p["resumed_from"] = resume_from
+            p["resume_session"] = resume_session
         wd = batch_dir / str(p["label"]).replace("/", "-").replace(" ", "_")
         wd.mkdir(parents=True, exist_ok=True)
         work_dirs.append(wd)
@@ -1313,7 +1470,8 @@ def _dispatch_batch(
 
         # 生成 launcher
         safe_label = re.sub(r'[^\w一-鿿-]', '_', str(p['label']))[:30]
-        model_arg = f'-m {p["model"]} --title "ocsr-{safe_label}"'
+        session_arg = f"--session {p['resume_session']} " if p.get("resume_session") else ""
+        model_arg = f'{session_arg}-m {p["model"]} --title "ocsr-{safe_label}"'
         _write_utf8(wd / "launcher.ps1", _pwsh_code(model_arg))
 
         if progress:
@@ -1335,7 +1493,8 @@ def _dispatch_batch(
                               prompt_size_bytes=parsed[i].get("prompt_size_bytes", 0),
                               task_id=task_id, label=parsed[i]["label"],
                               plan_ref=plan_ref,
-                              scope=scope, blocking_chain=blocking_chain)
+                              scope=scope, blocking_chain=blocking_chain,
+                              **_resume_row_fields(parsed[i]))
         start_times.append(time.time())
         # 注：这行父进程写入是既有行为，本次拆分**刻意保持不变**。
         # 删除它是 20260809 计划 Phase 2 的 B7 项（marker 应仅由 launcher 产生），
@@ -1354,6 +1513,8 @@ def _dispatch_batch(
             "prompt_file": str(parsed[i]["prompt_file"]),
             "expected_output": str(parsed[i]["output"]),
             "work_dir": str(wd),
+            "attempt_index": attempt_index,
+            **_resume_row_fields(parsed[i]),
         }
         if converge_invocation_id:
             launched_row["converge_invocation_id"] = converge_invocation_id
@@ -1379,6 +1540,7 @@ def _dispatch_batch(
                          max_renewals=max_renewals,
                          recovery_safe=recovery_safe,
                          attempt_index=attempt_index)
+        _record_resume_session(parsed, ledger)
         if _collision_report(output_dir, snapshot_before, expected_names, ledger,
                               allow_overwrite=frozenset(allow_overwrite or ())):
             return EXIT_PATH_COLLISION
@@ -1428,7 +1590,7 @@ def cmd_dispatch(args) -> int:
     bc_raw = meta.get("blocking_chain", "")
     blocking_chain = [x.strip() for x in bc_raw.split(",") if x.strip()] if bc_raw else []
     converge_invocation_id = meta.get("converge-invocation-id", "")
-    attempt_index = getattr(args, "attempt_index", 1)
+    requested_attempt = getattr(args, "attempt_index", None)
     recovery_safe = bool(getattr(args, "recovery_safe", False))
 
     # 解析 --forbid-paths（评审锚定污染对治）
@@ -1462,6 +1624,51 @@ def cmd_dispatch(args) -> int:
         print("❌ output 路径冲突（output-pattern 产生了重复文件名）", file=sys.stderr)
         return 1
 
+    # 返工续接：只允许单 worker；模型必须与原派发一致；旧进程必须已退出。
+    resume_from_arg = getattr(args, "resume_from", None)
+    resume_ctx: dict | None = None
+    if resume_from_arg:
+        if len(workers) != 1:
+            print("❌ --resume-from 只允许单个 --worker（续接是同一任务的新一次尝试）",
+                  file=sys.stderr)
+            return 1
+        resume_ctx, resume_error = _read_resume_context(Path(resume_from_arg))
+        if resume_error or resume_ctx is None:
+            print(f"❌ {resume_error}", file=sys.stderr)
+            return 1
+        if parsed[0]["model"] != resume_ctx["model"]:
+            print(f"❌ 续接必须沿用原派发模型：原 {resume_ctx['model']}，"
+                  f"本次 {parsed[0]['model']}；换模型请新开", file=sys.stderr)
+            return 1
+        process_status = _resume_process_status(
+            resume_ctx["pid"], resume_ctx["creation_time"], _query_process_table())
+        if process_status == "running":
+            print("❌ 原 worker 进程仍在运行，拒绝续接；请等待其退出或先终止",
+                  file=sys.stderr)
+            return 1
+        if process_status == "unknown":
+            print("❌ 无法确认原 worker 进程已退出（进程表不可读或身份缺失），拒绝续接",
+                  file=sys.stderr)
+            return 1
+        original_attempt = resume_ctx.get("attempt_index")
+        if requested_attempt is None:
+            attempt_index = (original_attempt + 1) if original_attempt is not None else 1
+        else:
+            attempt_index = requested_attempt
+        if original_attempt is not None and attempt_index <= original_attempt:
+            print(f"❌ 续接必须记为同一任务的新一次尝试："
+                  f"原 attempt_index={original_attempt}，本次 {attempt_index}", file=sys.stderr)
+            return 1
+        if original_attempt is None and requested_attempt is None:
+            print("⚠️ 原目录未记录 attempt_index，按第 1 次尝试记账；"
+                  "上层仍须遵守同一任务三次总尝试上限", file=sys.stderr)
+        if not 1 <= attempt_index <= MAX_ATTEMPTS:
+            print(f"❌ 三次总尝试上限已到（原 attempt_index={original_attempt}），"
+                  f"停止续接或新开任务", file=sys.stderr)
+            return 1
+    else:
+        attempt_index = requested_attempt if requested_attempt is not None else 1
+
     # 查模型 cost
     cost_input = 0.0
     cost_output = 0.0
@@ -1493,6 +1700,8 @@ def cmd_dispatch(args) -> int:
         recovery_safe=recovery_safe,
         attempt_index=attempt_index,
         allow_overwrite=list(getattr(args, "allow_overwrite", None) or []),
+        resume_from=resume_ctx["work_dir"] if resume_ctx else "",
+        resume_session=resume_ctx["session_id"] if resume_ctx else "",
     )
 
 
@@ -1710,6 +1919,7 @@ def _watch_loop(
                 _append_dispatch_ledger(ledger, {
                     "event": "artifact_seen", "label": p["label"], "model": p["model"],
                     "output": str(output), "bytes": output.stat().st_size,
+                    "attempt_index": attempt_index, **_resume_row_fields(p),
                 })
                 state = _read_json_object(wd / WORKER_STATE_FILE) or {}
                 state.setdefault("state", "unknown")
@@ -1749,13 +1959,16 @@ def _watch_loop(
                                   timeout_policy_requested=timeout_policy_requested,
                                   timeout_policy_resolved=timeout_policy,
                                   forbid_paths=len(forbid_paths or []),
-                                  read_audit=read_audit)
+                                  read_audit=read_audit,
+                                  **_resume_row_fields(p))
                 landed_row: dict[str, object] = {
                     "event": "landed", "label": p["label"], "model": p["model"],
                     "output": str(output), "bytes": output.stat().st_size,
                     "wall_min": round(elapsed, 1),
                     "pre_existed": land_meta.get("pre_existed", False),
                     "change": land_meta.get("change", True),
+                    "attempt_index": attempt_index,
+                    **_resume_row_fields(p),
                 }
                 if converge_invocation_id:
                     landed_row["converge_invocation_id"] = converge_invocation_id
@@ -1781,10 +1994,12 @@ def _watch_loop(
                                   prompt_size_bytes=p.get("prompt_size_bytes", 0),
                                   task_id=task_id, label=p.get("label", ""),
                                   plan_ref=plan_ref,
-                                  scope=scope, blocking_chain=blocking_chain)
+                                  scope=scope, blocking_chain=blocking_chain,
+                                  **_resume_row_fields(p))
                 _append_dispatch_ledger(ledger, {
                     "event": "failed", "reason": "launcher_error", "label": p["label"],
                     "model": p["model"], "wall_min": round(elapsed, 1), "detail": err_text[:200],
+                    "attempt_index": attempt_index, **_resume_row_fields(p),
                 })
                 print(f"[ocsr] ❌ {p['label']} 启动失败: {err_text}")
                 failed.add(i)
@@ -1832,11 +2047,13 @@ def _watch_loop(
                                   task_id=task_id, label=p.get("label", ""),
                                   plan_ref=plan_ref,
                                   scope=scope, blocking_chain=blocking_chain,
-                                  outcome_detail=od)
+                                  outcome_detail=od,
+                                  **_resume_row_fields(p))
                 _append_dispatch_ledger(ledger, {
                     "event": "failed", "reason": reason,
                     "label": p["label"], "model": p["model"], "wall_min": round(elapsed, 1),
                     "exit_code": exit_code,
+                    "attempt_index": attempt_index, **_resume_row_fields(p),
                 })
                 print(human)
                 failed.add(i)
@@ -2013,7 +2230,8 @@ def _watch_loop(
                               renewal_count=renewal_counts[i],
                               session_status=snapshot["session_status"],
                               old_process_stop_verified=state["old_process_stop_verified"],
-                              resume_eligible=resume_eligible)
+                              resume_eligible=resume_eligible,
+                              **_resume_row_fields(p))
             _append_dispatch_ledger(ledger, {
                 "event": event_result, "reason": fail_reason, "label": p["label"],
                 "model": p["model"], "wall_min": round(elapsed, 1),
@@ -2026,6 +2244,8 @@ def _watch_loop(
                 "session_status": snapshot["session_status"],
                 "old_process_stop_verified": state["old_process_stop_verified"],
                 "resume_eligible": resume_eligible,
+                "attempt_index": attempt_index,
+                **_resume_row_fields(p),
             })
             print(progress_text)
             timed_out.add(i)
@@ -2824,10 +3044,14 @@ def main():
                         help="检查到可审计进展后的单次续期分钟数（默认等于 timeout）")
     p_disp.add_argument("--max-renewals", type=int, default=DEFAULT_MAX_RENEWALS,
                         help=f"检查期限的最大续期次数（默认 {DEFAULT_MAX_RENEWALS}）")
-    p_disp.add_argument("--attempt-index", type=int, choices=range(1, MAX_ATTEMPTS + 1), default=1,
-                        help="同一任务的总尝试序号（1..3）；恢复材料沿用此计数")
+    p_disp.add_argument("--attempt-index", type=int, choices=range(1, MAX_ATTEMPTS + 1), default=None,
+                        help="同一任务的总尝试序号（1..3）；默认 1，--resume-from 时默认原次数 + 1")
     p_disp.add_argument("--recovery-safe", action="store_true",
                         help="声明 worker 无副作用或已证明幂等；仅影响是否生成可用恢复材料")
+    p_disp.add_argument("--resume-from", metavar="WORKER_DIR",
+                        help="接续原 worker 会话（返工）：传入含 session-binding.json 与 "
+                             "process-identity.json 的 <work-dir>/ocsr_dispatch_*/<label>/ 目录。"
+                             "只允许单个 --worker，模型须与原派发一致，旧进程须已退出")
     p_disp.add_argument("--timeout-policy", choices=sorted(TIMEOUT_POLICY_VALUES),
                         default=TIMEOUT_POLICY_AUTO,
                         help=f"超时行为策略: {TIMEOUT_POLICY_AUTO}=按角色自动解析（默认），"
