@@ -2,6 +2,16 @@
 
 ## 2026-10-18
 
+### 续接前校验原工作目录（cwd）
+
+#### 变更内容
+- launcher 把 worker 的工作目录（dispatch 进程当前目录，绝对路径）写入 `session-binding.json` 的 `cwd`；接续派发时若原 `cwd` 可核对，新绑定沿用原目录（会话仍绑定在那里），否则记录当前 dispatch 目录。
+- `--resume-from` 在启动副作用前校验原 `cwd`：目录不存在则拒绝，并提示在原路径重建（如 `git worktree add <路径>`）或新开 worker；旧派发无 `cwd` 记录时只提示「无法核对原工作目录，若已删除接续会失败」；当前 cwd 与原 `cwd` 不同时允许，但提示「opencode 会在原工作目录 <路径> 打开会话；请在返工提示词里写明要改的目录」。
+- 文档同步：`refs/dispatch-patterns.md`「接续原会话（返工）」与 `docs/pitfalls.md`「opencode 会话绑定原工作目录」。
+
+#### 迁移影响
+- 旧派发目录没有 `cwd` 记录，续接不阻止但会提示；无需迁移。
+
 ### 返工可接续原会话（dispatch --resume-from）
 
 #### 变更内容

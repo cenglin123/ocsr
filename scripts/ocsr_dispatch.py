@@ -280,17 +280,20 @@ def _resolve_timeout_policy(policy: str, role: str) -> str:
 
 
 # ─── 工具 ────────────────────────────────────────────────────────────
-def _pwsh_code(text: str) -> str:
-    """生成 launcher，流式保存 JSON 并绑定唯一 sessionID。
+def _pwsh_code(text: str, cwd: str | None = None) -> str:
+    """生成 launcher，流式保存 JSON 并绑定唯一 sessionID 与工作目录。
 
     ``session-binding.json`` 只在同一次 ``opencode run --format json`` 的顶层
-    ``sessionID`` 唯一时存在。缺失或歧义只禁止后续 resume，不改变本次
+    ``sessionID`` 唯一时存在；其中的 ``cwd`` 记录 worker 的工作目录（绝对路径），
+    供 ``--resume-from`` 在启动前核对。缺失或歧义只禁止后续 resume，不改变本次
     ``opencode`` 的真实退出码；watcher 不会查询 SQLite 或猜测目录中的“最新 session”。
 
     ``--standalone``：每个 worker 用私有服务器。默认会连接（必要时拉起）常驻后台服务，
     服务按工作目录常驻 MCP 子进程且不随 run 结束释放，worker 目录因此被占用、无法删除。
     """
     command_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    worker_cwd = cwd or str(Path.cwd())
+    cwd_literal = worker_cwd.replace("'", "''")
     return textwrap.dedent(f"""\
         if ($env:OCSR_DISABLE_MODEL_CALLS -eq '1') {{
             "launcher blocked: OCSR_DISABLE_MODEL_CALLS=1" | Set-Content "$PSScriptRoot/error.log"
@@ -318,6 +321,7 @@ def _pwsh_code(text: str) -> str:
                 if ($sessionIDs.Count -eq 1) {{
                   $binding = [ordered]@{{
                     session_id = @($sessionIDs)[0]
+                    cwd = '{cwd_literal}'
                     pid = $identity.pid
                     creation_time = $identity.creation_time
                     command_fingerprint = $identity.command_fingerprint
@@ -541,6 +545,10 @@ def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
     binding_fingerprint = str(binding.get("command_fingerprint") or "").strip()
     if fingerprint and binding_fingerprint and fingerprint != binding_fingerprint:
         return None, "session 绑定不可用，请新开：命令指纹不一致"
+    raw_cwd = binding.get("cwd")
+    cwd = raw_cwd.strip() if isinstance(raw_cwd, str) else ""
+    if cwd and not Path(cwd).is_absolute():
+        cwd = ""
     model = _read_dispatch_model(wd)
     if not model:
         return None, "无法核对原派发模型：launcher.ps1 中找不到 -m，拒绝续接"
@@ -566,6 +574,7 @@ def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
         "pid": binding_pid,
         "creation_time": creation_time,
         "model": model,
+        "cwd": cwd,
         "attempt_index": original_attempt,
         "rework_index": original_rework,
         "resume_mode": _detect_resume_mode(wd, state_obj),
@@ -1417,6 +1426,7 @@ def _dispatch_batch(
     resume_session: str = "",
     resume_mode: str = "",
     rework_index: int = 0,
+    binding_cwd: str = "",
 ) -> int:
     """派发内核：**已解析完毕**的 worker 批次 → 退出码。
 
@@ -1518,7 +1528,8 @@ def _dispatch_batch(
         safe_label = re.sub(r'[^\w一-鿿-]', '_', str(p['label']))[:30]
         session_arg = f"--session {p['resume_session']} " if p.get("resume_session") else ""
         model_arg = f'{session_arg}-m {p["model"]} --title "ocsr-{safe_label}"'
-        _write_utf8(wd / "launcher.ps1", _pwsh_code(model_arg))
+        _write_utf8(wd / "launcher.ps1",
+                    _pwsh_code(model_arg, cwd=binding_cwd or str(Path.cwd())))
 
         if progress:
             print(f"[ocsr] [{i+1}/{len(parsed)}] 已就绪: {p['label']} ({p['model']}) → {p['output']}")
@@ -1700,6 +1711,27 @@ def cmd_dispatch(args) -> int:
             print(f"❌ 续接必须沿用原派发模型：原 {resume_ctx['model']}，"
                   f"本次 {parsed[0]['model']}；换模型请新开", file=sys.stderr)
             return 1
+        original_cwd = resume_ctx.get("cwd", "")
+        if original_cwd:
+            original_cwd_path = Path(original_cwd)
+            if not original_cwd_path.is_dir():
+                print(f"❌ opencode 会话绑定在原工作目录 {original_cwd_path}，"
+                      f"该目录已不存在；请在原路径重建"
+                      f"（如 git worktree add {original_cwd_path}）后再接续，或新开 worker",
+                      file=sys.stderr)
+                return 1
+            try:
+                same_cwd = (
+                    os.path.normcase(str(original_cwd_path.resolve()))
+                    == os.path.normcase(str(Path.cwd().resolve()))
+                )
+            except OSError:
+                same_cwd = False
+            if not same_cwd:
+                print(f"⚠️ opencode 会在原工作目录 {original_cwd_path} 打开会话；"
+                      f"请在返工提示词里写明要改的目录", file=sys.stderr)
+        else:
+            print("⚠️ 无法核对原工作目录，若已删除接续会失败", file=sys.stderr)
         process_table = _query_process_table()
         process_status = _resume_process_status(
             resume_ctx["pid"], resume_ctx["creation_time"], process_table)
@@ -1763,10 +1795,12 @@ def cmd_dispatch(args) -> int:
                 print(f"❌ 三次总尝试上限已到（原 attempt_index={original_attempt}），"
                       f"停止续接或新开任务", file=sys.stderr)
                 return 1
+        binding_cwd = resume_ctx.get("cwd", "")
     else:
         attempt_index = requested_attempt if requested_attempt is not None else 1
         rework_index = 0
         resume_mode = ""
+        binding_cwd = ""
 
     # 查模型 cost
     cost_input = 0.0
@@ -1803,6 +1837,7 @@ def cmd_dispatch(args) -> int:
         resume_session=resume_ctx["session_id"] if resume_ctx else "",
         resume_mode=resume_mode,
         rework_index=rework_index,
+        binding_cwd=binding_cwd,
     )
 
 
