@@ -2143,3 +2143,412 @@ class TestAllowOverwrite:
         ]
         assert rows[0]["overwritten"] == ["other.md"]
         assert rows[0]["declared_overwrite"] == ["plan.md"]
+
+
+# ─── 测试 36: 返工续接（--resume-from） ───────────────────────────────
+def _make_resume_worker_dir(
+    root: Path,
+    *,
+    model: str = "vendor/model-a",
+    session_id: str = "ses_original",
+    pid: int = 4242,
+    creation_time: str = "638000000000000000",
+    attempt: int | None = 1,
+    state: str | None = None,
+    rework_index: int | None = None,
+    exit_code: int | None = None,
+) -> Path:
+    wd = root / "ocsr_dispatch_20261018_120000_abcdef" / "w1"
+    wd.mkdir(parents=True)
+    (wd / "session-binding.json").write_text(json.dumps({
+        "session_id": session_id,
+        "pid": pid,
+        "creation_time": creation_time,
+        "command_fingerprint": "f" * 64,
+    }), encoding="utf-8")
+    (wd / "process-identity.json").write_text(json.dumps({
+        "pid": pid,
+        "creation_time": creation_time,
+        "command_fingerprint": "f" * 64,
+    }), encoding="utf-8")
+    (wd / "launcher.ps1").write_text(
+        f'& opencode run $prompt --format json --standalone -m {model} '
+        f'--title "ocsr-w1" 2>&1\n',
+        encoding="utf-8",
+    )
+    (wd / "pid.txt").write_text(f"{pid}\n", encoding="ascii")
+    state_obj: dict[str, object] = {}
+    if state is not None:
+        state_obj["state"] = state
+    if attempt is not None:
+        state_obj["attempt_index"] = attempt
+    if rework_index is not None:
+        state_obj["rework_index"] = rework_index
+    if state_obj:
+        (wd / "worker-state.json").write_text(
+            json.dumps(state_obj), encoding="utf-8")
+    if exit_code is not None:
+        (wd / "start.marker").write_text(
+            f"pwsh started 2026-10-18T00:00:00\nexit={exit_code}\n",
+            encoding="utf-8")
+    return wd
+
+
+def _resume_dispatch_args(
+    tmp_path: Path,
+    resume_wd: Path,
+    *,
+    model: str = "vendor/model-a",
+    workers: list[str] | None = None,
+    attempt_index: int | None = None,
+    rework_index: int | None = None,
+    watch: bool = False,
+) -> object:
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("修复验收清单中的问题。\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(exist_ok=True)
+
+    class FakeArgs:
+        pass
+
+    args = FakeArgs()
+    args.worker = workers or [f"{prompt}|{model}|w1"]
+    args.output_dir = str(out_dir)
+    args.output_pattern = "{label}.md"
+    args.stagger = 0
+    args.timeout = 15
+    args.timeout_policy = mod.TIMEOUT_POLICY_LEAF_KILL
+    args.watch = watch
+    args.progress = False
+    args.work_dir = str(tmp_path / "work")
+    args.harness = "test"
+    args.meta = []
+    args.ledger_dir = str(tmp_path / "ledger")
+    args.forbid_paths = []
+    args.attempt_index = attempt_index
+    args.rework_index = rework_index
+    args.recovery_safe = False
+    args.resume_from = str(resume_wd)
+    return args
+
+
+class TestResumeFrom:
+    """--resume-from: 单 worker、同模型、绑定可用、旧进程已退出。"""
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self, monkeypatch):
+        monkeypatch.setattr(mod, "ALLOWED_MODELS", frozenset({"vendor/model-a"}))
+        monkeypatch.setattr(mod, "_check_model_calls_disabled", lambda: None)
+        monkeypatch.setattr(mod, "_lookup_model_cost",
+                            lambda _m: {"input": 0.0, "output": 0.0})
+        self.launched: list[Path] = []
+        monkeypatch.setattr(mod, "_launch_worker",
+                            lambda wd: self.launched.append(wd) or 1234)
+        # 默认进程表中不含目标 PID → 原进程已退出。
+        monkeypatch.setattr(mod, "_query_process_table",
+                            lambda: {1: {"parent_pid": 0, "creation_time": "1"}})
+
+    def test_rejects_multiple_workers(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        prompt = tmp_path / "p.txt"
+        prompt.write_text("x\n", encoding="utf-8")
+        args = _resume_dispatch_args(
+            tmp_path, resume_wd,
+            workers=[f"{prompt}|vendor/model-a|w1", f"{prompt}|vendor/model-a|w2"])
+        assert mod.cmd_dispatch(args) == 1
+        assert "只允许单个 --worker" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rejects_changed_model(self, tmp_path, capsys, monkeypatch):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        monkeypatch.setattr(mod, "ALLOWED_MODELS",
+                            frozenset({"vendor/model-a", "vendor/model-b"}))
+        args = _resume_dispatch_args(tmp_path, resume_wd, model="vendor/model-b")
+        assert mod.cmd_dispatch(args) == 1
+        assert "续接必须沿用原派发模型" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rejects_missing_binding(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        (resume_wd / "session-binding.json").unlink()
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "session 绑定不可用" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rejects_corrupt_binding(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        (resume_wd / "session-binding.json").write_text(
+            json.dumps({"pid": 4242}), encoding="utf-8")
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "session_id 缺失或格式错误" in capsys.readouterr().err
+        assert self.launched == []
+
+    @pytest.mark.parametrize("bad_session_id", [
+        "a;calc",
+        "ses with space",
+        'ses"quote',
+        "ses'quote",
+    ])
+    def test_rejects_invalid_session_id_characters(self, tmp_path, capsys,
+                                                   bad_session_id):
+        resume_wd = _make_resume_worker_dir(tmp_path, session_id=bad_session_id)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "session_id 缺失或格式错误" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rejects_unverifiable_model(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        (resume_wd / "launcher.ps1").unlink()
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "无法核对原派发模型" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rejects_when_old_process_still_running(self, tmp_path, capsys, monkeypatch):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        monkeypatch.setattr(mod, "_query_process_table", lambda: {
+            4242: {"parent_pid": 0, "creation_time": "638000000000000000"},
+        })
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "原 worker 进程仍在运行" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rejects_when_process_identity_unknown(self, tmp_path, capsys, monkeypatch):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        monkeypatch.setattr(mod, "_query_process_table", lambda: {})
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "无法确认原 worker 进程已退出" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rejects_live_descendant_of_old_pid(self, tmp_path, capsys, monkeypatch):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        monkeypatch.setattr(mod, "_query_process_table", lambda: {
+            # 原 launcher PID 已消失，但其 opencode 子进程仍以它为父。
+            9001: {"parent_pid": 4242, "creation_time": "638000000000000002"},
+        })
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        err = capsys.readouterr().err
+        assert "仍有存活后代进程" in err
+        assert "9001" in err
+        assert self.launched == []
+
+    def test_pid_reuse_is_treated_as_exited_and_launcher_resumes(
+            self, tmp_path, monkeypatch):
+        resume_wd = _make_resume_worker_dir(tmp_path)
+        monkeypatch.setattr(mod, "_query_process_table", lambda: {
+            4242: {"parent_pid": 0, "creation_time": "999999999999999999"},
+        })
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        assert len(self.launched) == 1
+        launcher = (self.launched[0] / "launcher.ps1").read_text(encoding="utf-8")
+        assert "--standalone" in launcher
+        assert "--session ses_original" in launcher
+        assert "-m vendor/model-a" in launcher
+        # 同一任务的新一次尝试：原 attempt_index=1 → 2。
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resumed_from"].startswith("<user-home>")
+        assert launched_row["resume_session"] == "ses_original"
+        assert launched_row["attempt_index"] == 2
+        # 非 --watch 路径也必须在启动时落 attempt_index（三次上限依据）。
+        state = json.loads(
+            (self.launched[0] / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["state"] == "launched"
+        assert state["attempt_index"] == 2
+        assert "total_deadline" in state
+
+    def test_rejects_missing_original_attempt_without_explicit_index(
+            self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path, attempt=None)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "原目录未记录 attempt_index" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_explicit_attempt_index_allowed_when_original_missing(
+            self, tmp_path):
+        resume_wd = _make_resume_worker_dir(tmp_path, attempt=None)
+        args = _resume_dispatch_args(tmp_path, resume_wd, attempt_index=2)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["attempt_index"] == 2
+
+    def test_rejects_attempt_limit_reached(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path, attempt=3)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "三次总尝试上限已到" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rework_keeps_attempt_and_increments_rework_index(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", attempt=2)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "rework"
+        assert launched_row["attempt_index"] == 2
+        assert launched_row["rework_index"] == 1
+        state = json.loads(
+            (self.launched[0] / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["resume_mode"] == "rework"
+        assert state["attempt_index"] == 2
+        assert state["rework_index"] == 1
+
+    def test_rework_rejects_when_rework_limit_reached(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", rework_index=mod.MAX_REWORKS)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "返工轮数上限已到" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_start_marker_exit_zero_without_worker_state_is_rework(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, attempt=None, exit_code=0)
+        assert not (resume_wd / "worker-state.json").exists()
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "rework"
+        assert launched_row["attempt_index"] == 1
+        assert launched_row["rework_index"] == 1
+
+    def test_nonzero_exit_is_recovery_and_increments_attempt(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="running", attempt=1, exit_code=1)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "recovery"
+        assert launched_row["attempt_index"] == 2
+        assert launched_row["rework_index"] == 0
+
+    def test_rework_rejects_explicit_attempt_index(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path, state="landed")
+        args = _resume_dispatch_args(tmp_path, resume_wd, attempt_index=2)
+        assert mod.cmd_dispatch(args) == 1
+        assert "返工接续不增加 attempt_index" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rework_index_explicit_must_exceed_original(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", rework_index=2)
+        args = _resume_dispatch_args(tmp_path, resume_wd, rework_index=2)
+        assert mod.cmd_dispatch(args) == 1
+        assert "必须大于原 rework_index" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rework_index_explicit_accepted_when_original_missing(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", rework_index=None)
+        args = _resume_dispatch_args(tmp_path, resume_wd, rework_index=2)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "rework"
+        assert launched_row["rework_index"] == 2
+
+    def test_recovery_rejects_rework_index(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="timed_out", attempt=1)
+        args = _resume_dispatch_args(tmp_path, resume_wd, rework_index=1)
+        assert mod.cmd_dispatch(args) == 1
+        assert "--rework-index 仅用于返工接续" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_watch_worker_state_records_resume_mode_and_rework(self, tmp_path):
+        wd = tmp_path / "wd"
+        wd.mkdir()
+        parsed = [{
+            "output": tmp_path / "out.md", "label": "w0", "model": "vendor/model-a",
+            "work_dir": wd, "resume_mode": "rework", "rework_index": 2,
+            "attempt_index": 2,
+        }]
+        old = mod.DISPATCH_LOG
+        mod.DISPATCH_LOG = tmp_path / "dispatch-log.jsonl"
+        try:
+            with mock.patch.object(mod, "_kill_worker", return_value=True):
+                with mock.patch.object(mod.time, "sleep", lambda _x: None):
+                    rc = mod._watch_loop(
+                        parsed, [time.time() - 120], timeout_min=1, progress=False,
+                        timeout_policy=mod.TIMEOUT_POLICY_LEAF_KILL, attempt_index=2)
+        finally:
+            mod.DISPATCH_LOG = old
+        assert rc == 1
+        state = json.loads((wd / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["resume_mode"] == "rework"
+        assert state["rework_index"] == 2
+        assert state["attempt_index"] == 2
+
+    def test_records_returned_session_id_when_changed(self, tmp_path, capsys):
+        new_wd = tmp_path / "new"
+        new_wd.mkdir()
+        (new_wd / "run.log").write_text(
+            json.dumps({"sessionID": "ses_new"}) + "\n", encoding="utf-8")
+        (new_wd / "session-binding.json").write_text(json.dumps({
+            "session_id": "ses_new", "pid": 777,
+            "creation_time": "638000000000000001",
+            "command_fingerprint": "a" * 64,
+        }), encoding="utf-8")
+        (new_wd / "process-identity.json").write_text(json.dumps({
+            "pid": 777, "creation_time": "638000000000000001",
+            "command_fingerprint": "a" * 64,
+        }), encoding="utf-8")
+        (new_wd / "pid.txt").write_text("777\n", encoding="ascii")
+        parsed = [{
+            "label": "w1", "model": "vendor/model-a", "work_dir": new_wd,
+            "resumed_from": str(tmp_path / "old"), "resume_session": "ses_original",
+        }]
+        ledger = tmp_path / "ledger.jsonl"
+        mod._record_resume_session(parsed, ledger)
+        out = capsys.readouterr().out
+        assert "续接返回了新的 sessionID" in out
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        assert rows[0]["event"] == "resume_session"
+        assert rows[0]["resume_session"] == "ses_original"
+        assert rows[0]["resume_session_returned"] == "ses_new"
+        assert rows[0]["resume_session_changed"] is True
+
+    def test_telemetry_records_resume_fields(self, tmp_path):
+        old = mod.DISPATCH_LOG
+        mod.DISPATCH_LOG = tmp_path / "dispatch-log.jsonl"
+        try:
+            mod._append_telemetry(
+                model="vendor/model-a", role="executor", channel="detached",
+                outcome="success", wall_min=1.0, artifact_bytes=10,
+                resumed_from=str(tmp_path / "old"), resume_session="ses_original",
+                resume_mode="rework", rework_index=2,
+            )
+            row = json.loads(mod.DISPATCH_LOG.read_text(encoding="utf-8").splitlines()[0])
+            assert row["resumed_from"] == mod._sanitize_path(str(tmp_path / "old"))
+            assert row["resume_session"] == "ses_original"
+            assert row["resume_mode"] == "rework"
+            assert row["rework_index"] == 2
+        finally:
+            mod.DISPATCH_LOG = old

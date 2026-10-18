@@ -55,6 +55,8 @@ python scripts/ocsr_dispatch.py dispatch --worker "<prompt>|<model>|<label>" --o
 
 失败切换阶梯、切换 family 与通道例外的操作细则在该专题；达到三次上限则停止并交回用户。`--fork` 不是默认路径；若使用，必须同时有 `--continue` 或 `--session`。
 
+worker 正常完成后按验收清单返工时，可用 `dispatch --resume-from <原 worker 派发目录>` 接续原会话；返工按 `rework_index` 单独计数、不占失败重试的 `attempt_index` 额度。何时可接续、何时必须新开见 [`refs/dispatch-patterns.md`](refs/dispatch-patterns.md) 的「接续原会话（返工）」。
+
 ### 4. 回收并验收
 
 依次检查：
