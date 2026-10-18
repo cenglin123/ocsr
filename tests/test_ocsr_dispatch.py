@@ -2157,15 +2157,19 @@ def _make_resume_worker_dir(
     state: str | None = None,
     rework_index: int | None = None,
     exit_code: int | None = None,
+    cwd: str | None = None,
 ) -> Path:
     wd = root / "ocsr_dispatch_20261018_120000_abcdef" / "w1"
     wd.mkdir(parents=True)
-    (wd / "session-binding.json").write_text(json.dumps({
+    binding_obj: dict[str, object] = {
         "session_id": session_id,
         "pid": pid,
         "creation_time": creation_time,
         "command_fingerprint": "f" * 64,
-    }), encoding="utf-8")
+    }
+    if cwd is not None:
+        binding_obj["cwd"] = cwd
+    (wd / "session-binding.json").write_text(json.dumps(binding_obj), encoding="utf-8")
     (wd / "process-identity.json").write_text(json.dumps({
         "pid": pid,
         "creation_time": creation_time,
@@ -2504,6 +2508,57 @@ class TestResumeFrom:
         assert state["resume_mode"] == "rework"
         assert state["rework_index"] == 2
         assert state["attempt_index"] == 2
+
+    def test_pwsh_code_records_cwd(self, tmp_path):
+        launcher = mod._pwsh_code("-m vendor/model-a", cwd=str(tmp_path))
+        assert f"cwd = '{tmp_path}'" in launcher
+
+    def test_fresh_dispatch_records_dispatch_cwd(self, tmp_path):
+        resume_wd = tmp_path / "unused"
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        args.resume_from = None
+        assert mod.cmd_dispatch(args) == 0
+        launcher = (self.launched[0] / "launcher.ps1").read_text(encoding="utf-8")
+        assert f"cwd = '{Path.cwd()}'" in launcher
+
+    def test_rejects_when_recorded_cwd_missing(self, tmp_path, capsys):
+        missing = tmp_path / "deleted-worktree"
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", cwd=str(missing))
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        err = capsys.readouterr().err
+        assert "opencode 会话绑定在原工作目录" in err
+        assert "该目录已不存在" in err
+        assert "git worktree add" in err
+        assert self.launched == []
+
+    def test_missing_cwd_warns_but_allows(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path, state="landed")
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        assert "无法核对原工作目录" in capsys.readouterr().err
+
+    def test_different_current_cwd_warns(self, tmp_path, capsys):
+        original = tmp_path / "original-worktree"
+        original.mkdir()
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", cwd=str(original))
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        err = capsys.readouterr().err
+        assert f"opencode 会在原工作目录 {original}" in err
+        assert "请在返工提示词里写明要改的目录" in err
+
+    def test_resumed_launcher_keeps_original_cwd(self, tmp_path):
+        original = tmp_path / "original-worktree"
+        original.mkdir()
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", cwd=str(original))
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        launcher = (self.launched[0] / "launcher.ps1").read_text(encoding="utf-8")
+        assert f"cwd = '{original}'" in launcher
 
     def test_records_returned_session_id_when_changed(self, tmp_path, capsys):
         new_wd = tmp_path / "new"
