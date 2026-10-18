@@ -53,7 +53,8 @@ if sys.platform == "win32":
 DEFAULT_STAGGER = 5       # 秒，多 worker 错峰间隔
 DEFAULT_TIMEOUT = 15      # 分钟，单个 worker 看门狗阈值
 DEFAULT_MAX_RENEWALS = 1  # 检查期限后的有限续期次数；总期限仍不可变
-MAX_ATTEMPTS = 3          # 与 SKILL.md 的每 worker 总尝试上限一致
+MAX_ATTEMPTS = 3          # 与 SKILL.md 的每 worker 失败重试总尝试上限一致
+MAX_REWORKS = 3           # 返工接续轮数上限（与失败重试分开计数）
 DISPATCH_LOG = Path.home() / ".ocsr" / "dispatch-log.jsonl"
 CONVERGE_LEDGER_NAME = "ocsr-dispatch-ledger.jsonl"  # 入库账本（随收敛证据一起提交）
 # dispatch 退出码契约（单一事实源见 refs/dispatch-patterns.md §退出码契约）
@@ -146,6 +147,8 @@ TELEMETRY_FIELDS: dict[str, str] = {
     "resume_eligible": "optional",
     "resumed_from": "optional",
     "resume_session": "optional",
+    "resume_mode": "optional",
+    "rework_index": "optional",
 }
 
 # 字节→token 近似系数（英文约 4 bytes/token，中文约 2-3 bytes/token）
@@ -483,12 +486,30 @@ def _read_dispatch_model(wd: Path) -> str:
     return ""
 
 
+def _detect_resume_mode(wd: Path, state: dict | None) -> str:
+    """判定续接模式：``rework``（原 worker 正常完成）或 ``recovery``。
+
+    - `worker-state.json` 的 ``state == "landed"`` → 返工。
+    - 无 `worker-state.json`（或只有启动态 ``launched``）且 `start.marker`
+      记有 ``exit=0`` → 返工；这是非 ``--watch`` 派发的正常完成证据。
+    - 其余（非 0 退出、无 exit 记录、timed_out/stopped/failed/running 等）→ 故障恢复。
+    """
+    state_name = str((state or {}).get("state") or "").strip()
+    if state_name == "landed":
+        return "rework"
+    if not state_name or state_name == "launched":
+        if _read_start_marker_exit(wd / "start.marker") == 0:
+            return "rework"
+    return "recovery"
+
+
 def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
     """读取并校验原 worker 派发目录，返回 ``(context, error)``。
 
     只接受同时具备 ``session-binding.json`` 与 ``process-identity.json`` 的目录；
     任何缺失、格式错误或两份文件身份不一致都 fail-closed。原派发模型从
-    ``launcher.ps1`` 的 ``-m`` 参数核对，无法核对即拒绝。
+    ``launcher.ps1`` 的 ``-m`` 参数核对，无法核对即拒绝。上下文同时给出
+    ``resume_mode``（rework/recovery）与原 ``rework_index``。
     """
     wd = Path(resume_dir)
     if not wd.is_dir():
@@ -523,13 +544,21 @@ def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
     model = _read_dispatch_model(wd)
     if not model:
         return None, "无法核对原派发模型：launcher.ps1 中找不到 -m，拒绝续接"
-    state = _read_json_object(wd / WORKER_STATE_FILE) or {}
+    state_obj = _read_json_object(wd / WORKER_STATE_FILE)
+    state = state_obj or {}
     raw_attempt = state.get("attempt_index")
     original_attempt = (
         raw_attempt
         if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool)
         and 1 <= raw_attempt <= MAX_ATTEMPTS
         else None
+    )
+    raw_rework = state.get("rework_index")
+    original_rework = (
+        raw_rework
+        if isinstance(raw_rework, int) and not isinstance(raw_rework, bool)
+        and raw_rework >= 0
+        else 0
     )
     return {
         "work_dir": str(wd),
@@ -538,6 +567,8 @@ def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
         "creation_time": creation_time,
         "model": model,
         "attempt_index": original_attempt,
+        "rework_index": original_rework,
+        "resume_mode": _detect_resume_mode(wd, state_obj),
     }, ""
 
 
@@ -565,6 +596,8 @@ def _resume_row_fields(p: dict) -> dict[str, object]:
     return {
         "resumed_from": p["resumed_from"],
         "resume_session": p.get("resume_session", ""),
+        "resume_mode": p.get("resume_mode", ""),
+        "rework_index": p.get("rework_index", 0),
     }
 
 
@@ -1018,6 +1051,8 @@ def _append_telemetry(
     resume_eligible: bool | None = None,
     resumed_from: str = "",
     resume_session: str = "",
+    resume_mode: str = "",
+    rework_index: int | None = None,
 ) -> None:
     now_ts = datetime.datetime.now().astimezone().isoformat()
     row = {
@@ -1071,6 +1106,10 @@ def _append_telemetry(
         row["resumed_from"] = _sanitize_path(resumed_from)
     if resume_session:
         row["resume_session"] = resume_session
+    if resume_mode:
+        row["resume_mode"] = resume_mode
+    if rework_index is not None:
+        row["rework_index"] = rework_index
     DISPATCH_LOG.parent.mkdir(parents=True, exist_ok=True)
     with DISPATCH_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -1160,6 +1199,9 @@ def _record_resume_session(parsed: list[dict], ledger: Path | None) -> None:
         "resumed_from": p.get("resumed_from", ""),
         "resume_session": original,
         "resume_session_status": status,
+        "attempt_index": p.get("attempt_index", 1),
+        "rework_index": p.get("rework_index", 0),
+        "resume_mode": p.get("resume_mode", ""),
     }
     if returned:
         row["resume_session_returned"] = returned
@@ -1373,6 +1415,8 @@ def _dispatch_batch(
     allow_overwrite: list[str] | None = None,
     resume_from: str = "",
     resume_session: str = "",
+    resume_mode: str = "",
+    rework_index: int = 0,
 ) -> int:
     """派发内核：**已解析完毕**的 worker 批次 → 退出码。
 
@@ -1450,6 +1494,9 @@ def _dispatch_batch(
     # 为每个 worker 生成 launcher
     work_dirs: list[Path] = []
     for i, p in enumerate(parsed):
+        p["attempt_index"] = attempt_index
+        p["rework_index"] = rework_index
+        p["resume_mode"] = resume_mode
         if resume_session:
             p["resumed_from"] = resume_from
             p["resume_session"] = resume_session
@@ -1505,6 +1552,8 @@ def _dispatch_batch(
             "renewal_count": 0,
             "max_renewals": max_renewals,
             "attempt_index": attempt_index,
+            "rework_index": rework_index,
+            "resume_mode": resume_mode,
             "artifact_state": "missing",
         })
         # 注：这行父进程写入是既有行为，本次拆分**刻意保持不变**。
@@ -1668,25 +1717,56 @@ def cmd_dispatch(args) -> int:
                   f"（可能为 opencode 残留），拒绝续接；请先清理后再试", file=sys.stderr)
             return 1
         original_attempt = resume_ctx.get("attempt_index")
-        if requested_attempt is None:
-            if original_attempt is None:
-                print("❌ 原目录未记录 attempt_index，拒绝续接；"
-                      "请显式传 --attempt-index <新序号>（仍受三次总上限约束）",
+        original_rework = resume_ctx.get("rework_index", 0)
+        resume_mode = resume_ctx["resume_mode"]
+        requested_rework = getattr(args, "rework_index", None)
+        if resume_mode == "rework":
+            if requested_attempt is not None:
+                print("❌ 返工接续不增加 attempt_index；--attempt-index 仅用于故障恢复",
                       file=sys.stderr)
                 return 1
-            attempt_index = original_attempt + 1
+            attempt_index = original_attempt if original_attempt is not None else 1
+            if requested_rework is None:
+                rework_index = original_rework + 1
+            else:
+                rework_index = requested_rework
+                if rework_index <= original_rework:
+                    print(f"❌ --rework-index 必须大于原 rework_index="
+                          f"{original_rework}，本次 {rework_index}", file=sys.stderr)
+                    return 1
+            if rework_index > MAX_REWORKS:
+                print(f"❌ 返工轮数上限已到（原 rework_index={original_rework}，"
+                      f"本次 {rework_index}/{MAX_REWORKS}）；请新开 worker",
+                      file=sys.stderr)
+                return 1
         else:
-            attempt_index = requested_attempt
-        if original_attempt is not None and attempt_index <= original_attempt:
-            print(f"❌ 续接必须记为同一任务的新一次尝试："
-                  f"原 attempt_index={original_attempt}，本次 {attempt_index}", file=sys.stderr)
-            return 1
-        if not 1 <= attempt_index <= MAX_ATTEMPTS:
-            print(f"❌ 三次总尝试上限已到（原 attempt_index={original_attempt}），"
-                  f"停止续接或新开任务", file=sys.stderr)
-            return 1
+            if requested_rework is not None:
+                print("❌ --rework-index 仅用于返工接续；故障恢复请用 --attempt-index",
+                      file=sys.stderr)
+                return 1
+            rework_index = original_rework
+            if requested_attempt is None:
+                if original_attempt is None:
+                    print("❌ 原目录未记录 attempt_index，拒绝续接；"
+                          "请显式传 --attempt-index <新序号>（仍受三次总上限约束）",
+                          file=sys.stderr)
+                    return 1
+                attempt_index = original_attempt + 1
+            else:
+                attempt_index = requested_attempt
+            if original_attempt is not None and attempt_index <= original_attempt:
+                print(f"❌ 故障恢复必须记为同一任务的新一次尝试："
+                      f"原 attempt_index={original_attempt}，本次 {attempt_index}",
+                      file=sys.stderr)
+                return 1
+            if not 1 <= attempt_index <= MAX_ATTEMPTS:
+                print(f"❌ 三次总尝试上限已到（原 attempt_index={original_attempt}），"
+                      f"停止续接或新开任务", file=sys.stderr)
+                return 1
     else:
         attempt_index = requested_attempt if requested_attempt is not None else 1
+        rework_index = 0
+        resume_mode = ""
 
     # 查模型 cost
     cost_input = 0.0
@@ -1721,6 +1801,8 @@ def cmd_dispatch(args) -> int:
         allow_overwrite=list(getattr(args, "allow_overwrite", None) or []),
         resume_from=resume_ctx["work_dir"] if resume_ctx else "",
         resume_session=resume_ctx["session_id"] if resume_ctx else "",
+        resume_mode=resume_mode,
+        rework_index=rework_index,
     )
 
 
@@ -1889,7 +1971,10 @@ def _watch_loop(
                 "inspection_deadline": deadlines[i],
                 "total_deadline": total_deadlines[i],
                 "renewal_count": renewal_counts[i], "max_renewals": max_renewals,
-                "attempt_index": attempt_index, "artifact_state": "missing",
+                "attempt_index": attempt_index,
+                "rework_index": p.get("rework_index", 0),
+                "resume_mode": p.get("resume_mode", ""),
+                "artifact_state": "missing",
                 "process_tree_status": launch_snapshot["process_tree_status"],
                 "session_status": launch_snapshot["session_status"],
                 "launch_baseline": _snapshot_progress_baseline(launch_snapshot),
@@ -2103,6 +2188,8 @@ def _watch_loop(
                 "total_deadline": total_deadlines[i],
                 "renewal_count": renewal_counts[i], "max_renewals": max_renewals,
                 "attempt_index": attempt_index,
+                "rework_index": p.get("rework_index", 0),
+                "resume_mode": p.get("resume_mode", ""),
                 "inspection_baseline": _snapshot_progress_baseline(previous_snapshots[i]),
                 **snapshot,
             }
@@ -2167,6 +2254,7 @@ def _watch_loop(
                     total_deadline=total_deadlines[i], renewal_count=renewal_counts[i],
                     session_status=snapshot["session_status"],
                     old_process_stop_verified=False, resume_eligible=False,
+                    **_resume_row_fields(p),
                 )
                 _append_dispatch_ledger(ledger, {
                     "event": "reported", "reason": "watchdog_inspection_reported",
@@ -2183,6 +2271,8 @@ def _watch_loop(
                     "old_process_stop_verified": False,
                     "resume_eligible": False,
                     "tracking_continues": True,
+                    "attempt_index": attempt_index,
+                    **_resume_row_fields(p),
                 })
                 print(f"[ocsr] ⏰ {p['label']} 检查期限到达，报告/{process_status}；"
                       f"继续跟踪至总期限")
@@ -3064,15 +3154,20 @@ def main():
     p_disp.add_argument("--max-renewals", type=int, default=DEFAULT_MAX_RENEWALS,
                         help=f"检查期限的最大续期次数（默认 {DEFAULT_MAX_RENEWALS}）")
     p_disp.add_argument("--attempt-index", type=int, choices=range(1, MAX_ATTEMPTS + 1), default=None,
-                        help="同一任务的总尝试序号（1..3）；默认 1，--resume-from 时默认原次数 + 1。"
-                             "原目录无 attempt_index 时必须显式指定")
+                        help="同一任务的故障恢复尝试序号（1..3）；默认 1，故障恢复续接时默认原次数 + 1。"
+                             "原目录无 attempt_index 时必须显式指定；返工接续不接受此参数")
+    p_disp.add_argument("--rework-index", type=int, default=None,
+                        help="返工轮数（1..3）；仅用于 --resume-from 返工模式。"
+                             "默认原 rework_index + 1；原目录无记录时可显式指定，必须大于原值")
     p_disp.add_argument("--recovery-safe", action="store_true",
                         help="声明 worker 无副作用或已证明幂等；仅影响是否生成可用恢复材料")
     p_disp.add_argument("--resume-from", metavar="WORKER_DIR",
-                        help="接续原 worker 会话（返工）：传入含 session-binding.json 与 "
+                        help="接续原 worker 会话：传入含 session-binding.json 与 "
                              "process-identity.json 的 <work-dir>/ocsr_dispatch_*/<label>/ 目录。"
                              "只允许单个 --worker，模型须与原派发一致，旧进程及其后代须已退出。"
-                             "sessionID 回读与变更提示仅在 --watch 路径执行")
+                             "按原目录状态自动区分返工（rework，不涨 attempt_index）与故障恢复"
+                             "（recovery，attempt_index + 1）；sessionID 回读与变更提示仅在 "
+                             "--watch 路径执行")
     p_disp.add_argument("--timeout-policy", choices=sorted(TIMEOUT_POLICY_VALUES),
                         default=TIMEOUT_POLICY_AUTO,
                         help=f"超时行为策略: {TIMEOUT_POLICY_AUTO}=按角色自动解析（默认），"

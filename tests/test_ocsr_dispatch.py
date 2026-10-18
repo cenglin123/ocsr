@@ -2154,6 +2154,9 @@ def _make_resume_worker_dir(
     pid: int = 4242,
     creation_time: str = "638000000000000000",
     attempt: int | None = 1,
+    state: str | None = None,
+    rework_index: int | None = None,
+    exit_code: int | None = None,
 ) -> Path:
     wd = root / "ocsr_dispatch_20261018_120000_abcdef" / "w1"
     wd.mkdir(parents=True)
@@ -2174,9 +2177,20 @@ def _make_resume_worker_dir(
         encoding="utf-8",
     )
     (wd / "pid.txt").write_text(f"{pid}\n", encoding="ascii")
+    state_obj: dict[str, object] = {}
+    if state is not None:
+        state_obj["state"] = state
     if attempt is not None:
+        state_obj["attempt_index"] = attempt
+    if rework_index is not None:
+        state_obj["rework_index"] = rework_index
+    if state_obj:
         (wd / "worker-state.json").write_text(
-            json.dumps({"attempt_index": attempt}), encoding="utf-8")
+            json.dumps(state_obj), encoding="utf-8")
+    if exit_code is not None:
+        (wd / "start.marker").write_text(
+            f"pwsh started 2026-10-18T00:00:00\nexit={exit_code}\n",
+            encoding="utf-8")
     return wd
 
 
@@ -2187,6 +2201,7 @@ def _resume_dispatch_args(
     model: str = "vendor/model-a",
     workers: list[str] | None = None,
     attempt_index: int | None = None,
+    rework_index: int | None = None,
     watch: bool = False,
 ) -> object:
     prompt = tmp_path / "prompt.txt"
@@ -2212,6 +2227,7 @@ def _resume_dispatch_args(
     args.ledger_dir = str(tmp_path / "ledger")
     args.forbid_paths = []
     args.attempt_index = attempt_index
+    args.rework_index = rework_index
     args.recovery_safe = False
     args.resume_from = str(resume_wd)
     return args
@@ -2377,6 +2393,118 @@ class TestResumeFrom:
         assert "三次总尝试上限已到" in capsys.readouterr().err
         assert self.launched == []
 
+    def test_rework_keeps_attempt_and_increments_rework_index(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", attempt=2)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "rework"
+        assert launched_row["attempt_index"] == 2
+        assert launched_row["rework_index"] == 1
+        state = json.loads(
+            (self.launched[0] / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["resume_mode"] == "rework"
+        assert state["attempt_index"] == 2
+        assert state["rework_index"] == 1
+
+    def test_rework_rejects_when_rework_limit_reached(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", rework_index=mod.MAX_REWORKS)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 1
+        assert "返工轮数上限已到" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_start_marker_exit_zero_without_worker_state_is_rework(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, attempt=None, exit_code=0)
+        assert not (resume_wd / "worker-state.json").exists()
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "rework"
+        assert launched_row["attempt_index"] == 1
+        assert launched_row["rework_index"] == 1
+
+    def test_nonzero_exit_is_recovery_and_increments_attempt(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="running", attempt=1, exit_code=1)
+        args = _resume_dispatch_args(tmp_path, resume_wd)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "recovery"
+        assert launched_row["attempt_index"] == 2
+        assert launched_row["rework_index"] == 0
+
+    def test_rework_rejects_explicit_attempt_index(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(tmp_path, state="landed")
+        args = _resume_dispatch_args(tmp_path, resume_wd, attempt_index=2)
+        assert mod.cmd_dispatch(args) == 1
+        assert "返工接续不增加 attempt_index" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rework_index_explicit_must_exceed_original(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", rework_index=2)
+        args = _resume_dispatch_args(tmp_path, resume_wd, rework_index=2)
+        assert mod.cmd_dispatch(args) == 1
+        assert "必须大于原 rework_index" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_rework_index_explicit_accepted_when_original_missing(self, tmp_path):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="landed", rework_index=None)
+        args = _resume_dispatch_args(tmp_path, resume_wd, rework_index=2)
+        assert mod.cmd_dispatch(args) == 0
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        launched_row = next(r for r in rows if r.get("event") == "launched")
+        assert launched_row["resume_mode"] == "rework"
+        assert launched_row["rework_index"] == 2
+
+    def test_recovery_rejects_rework_index(self, tmp_path, capsys):
+        resume_wd = _make_resume_worker_dir(
+            tmp_path, state="timed_out", attempt=1)
+        args = _resume_dispatch_args(tmp_path, resume_wd, rework_index=1)
+        assert mod.cmd_dispatch(args) == 1
+        assert "--rework-index 仅用于返工接续" in capsys.readouterr().err
+        assert self.launched == []
+
+    def test_watch_worker_state_records_resume_mode_and_rework(self, tmp_path):
+        wd = tmp_path / "wd"
+        wd.mkdir()
+        parsed = [{
+            "output": tmp_path / "out.md", "label": "w0", "model": "vendor/model-a",
+            "work_dir": wd, "resume_mode": "rework", "rework_index": 2,
+            "attempt_index": 2,
+        }]
+        old = mod.DISPATCH_LOG
+        mod.DISPATCH_LOG = tmp_path / "dispatch-log.jsonl"
+        try:
+            with mock.patch.object(mod, "_kill_worker", return_value=True):
+                with mock.patch.object(mod.time, "sleep", lambda _x: None):
+                    rc = mod._watch_loop(
+                        parsed, [time.time() - 120], timeout_min=1, progress=False,
+                        timeout_policy=mod.TIMEOUT_POLICY_LEAF_KILL, attempt_index=2)
+        finally:
+            mod.DISPATCH_LOG = old
+        assert rc == 1
+        state = json.loads((wd / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["resume_mode"] == "rework"
+        assert state["rework_index"] == 2
+        assert state["attempt_index"] == 2
+
     def test_records_returned_session_id_when_changed(self, tmp_path, capsys):
         new_wd = tmp_path / "new"
         new_wd.mkdir()
@@ -2415,9 +2543,12 @@ class TestResumeFrom:
                 model="vendor/model-a", role="executor", channel="detached",
                 outcome="success", wall_min=1.0, artifact_bytes=10,
                 resumed_from=str(tmp_path / "old"), resume_session="ses_original",
+                resume_mode="rework", rework_index=2,
             )
             row = json.loads(mod.DISPATCH_LOG.read_text(encoding="utf-8").splitlines()[0])
             assert row["resumed_from"] == mod._sanitize_path(str(tmp_path / "old"))
             assert row["resume_session"] == "ses_original"
+            assert row["resume_mode"] == "rework"
+            assert row["rework_index"] == 2
         finally:
             mod.DISPATCH_LOG = old

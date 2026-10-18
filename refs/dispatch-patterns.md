@@ -86,6 +86,8 @@ session 恢复由上层作为新的、显式授权的 invocation 发起：沿用
 
 若失败明确归因于通道（例如日志 0 字节、无产物且进程已被终止），先修通道而不换模型；这次修复仍计入三次总尝试上限，但不计作“同模型重派一次”。不得借通道问题无限重试。
 
+返工接续是 worker 正常完成后的修复轮，不占用本阶梯的 `attempt_index` 三次额度；它按独立的 `rework_index` 计数，上限 3 轮。返工期间若发生真正的失败，再按本阶梯的恢复模式增加 `attempt_index`。
+
 ## 脱管派发模式（前台超时不够用时）— 完整三步模板
 
 > **入口条件**：当 `scripts/ocsr_dispatch.py` 可用时优先用驱动器 `dispatch --watch`；仅当驱动器不可用（非本机环境、脚本缺失）时回退本节手写模式。
@@ -165,7 +167,16 @@ wait
 
 ## 接续原会话（返工）
 
-worker 已正常完成、上层按验收清单要求具体修复时，用 `dispatch --resume-from <原 worker 派发目录>` 接续原会话。原 worker 记得自己写过的代码与决策，返工只需给差异清单，通常比新开更省时省 token。默认仍是一次投递、文件回收；续接是返工的显式入口，不是常规多轮对话机制。
+worker 已正常完成、上层按验收清单要求具体修复时，用 `dispatch --resume-from <原 worker 派发目录>` 接续原会话。原 worker 记得自己写过的代码与决策，返工只需给差异清单，通常比新开更省时省 token。默认仍是一次投递、文件回收；续接是显式入口，不是常规多轮对话机制。
+
+### 两种模式与判定
+
+`--resume-from` 按原目录状态自动选择模式：
+
+- **返工（rework）**：`worker-state.json` 的 `state` 为 `landed`；或无 `worker-state.json`（或只有启动态 `launched`）且 `start.marker` 记有 `exit=0`。返工不增加 `attempt_index`（沿用原值；原目录没有则视为 1），而是增加独立的 `rework_index`（原目录没有记录视为 0，本次 = 原值 + 1），上限 3 轮；超过则拒绝并提示新开 worker。
+- **故障恢复（recovery）**：原 worker 未正常完成——非 0 退出、无 exit 记录，或 `state` 为 `timed_out`/`stopped`/`failed`/`running` 等。保持同一任务的新一次尝试：`attempt_index` + 1，三次总上限；原目录无 `attempt_index` 时必须显式传 `--attempt-index`。`rework_index` 沿用原值。
+
+`--rework-index` 仅返工模式可显式指定（用于原目录缺记录；必须大于原值且不超过 3）。返工模式传 `--attempt-index` 会拒绝，恢复模式传 `--rework-index` 也会拒绝。
 
 ### 何时用
 
@@ -198,11 +209,11 @@ python scripts/ocsr_dispatch.py dispatch `
   --output-dir <dir> --output-pattern R1-fix.md --watch
 ```
 
-驱动器会校验：只允许单个 worker；原派发模型与本次 `--worker` 模型一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 可用；旧 PID 与创建时间确认已退出（PID 复用视为已退出，无法确认则拒绝），且进程表中没有仍以该 PID 为父的后代（有存活后代则拒绝）。通过后 launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本记录 `resumed_from`、`resume_session` 与 `attempt_index`。新会话仍写新的 `session-binding.json`；返回的 sessionID 与原 id 不同时照实记录并提示——回读与提示只在 `--watch` 路径执行。续接按同一任务的新一次尝试计数：原目录有 `worker-state.json` 时默认 `原 attempt_index + 1`；原目录没有 `attempt_index` 时必须显式传 `--attempt-index <新序号>`，否则拒绝续接；三次总尝试上限由上层遵守。非 `--watch` 派发也会在启动时把 `attempt_index` 写入 `worker-state.json`。
+驱动器会校验：只允许单个 worker；原派发模型与本次 `--worker` 模型一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 可用；旧 PID 与创建时间确认已退出（PID 复用视为已退出，无法确认则拒绝），且进程表中没有仍以该 PID 为父的后代（有存活后代则拒绝）。通过后 launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本记录 `resumed_from`、`resume_session`、`resume_mode`、`attempt_index` 与 `rework_index`，`worker-state.json` 同样记录 `resume_mode`、`attempt_index` 与 `rework_index`。新会话仍写新的 `session-binding.json`；返回的 sessionID 与原 id 不同时照实记录并提示——回读与提示只在 `--watch` 路径执行。非 `--watch` 派发也会在启动时写入 `worker-state.json`。
 
 ### 与故障恢复材料的区别
 
-`resume-material.json`（见「session 绑定与恢复材料」）只在看门狗超时终止路径生成，服务的是故障恢复：由上层作为新的、显式授权的 invocation 发起，沿用同一 attempt 计数并走 reserve/settle。返工续接是 worker 正常完成后的主动返工入口，不依赖 `resume-material.json`，但同样不得绕过三次总尝试上限与上层预算门。
+`resume-material.json`（见「session 绑定与恢复材料」）只在看门狗超时终止路径生成，服务的是故障恢复：由上层作为新的、显式授权的 invocation 发起，沿用同一 attempt 计数并走 reserve/settle。返工续接是 worker 正常完成后的主动返工入口，不依赖 `resume-material.json`，但同样不得绕过返工轮数上限与上层预算门。
 
 `opencode run --fork` 仍是 CLI 会话 fork，不是 live 子代理句柄，也不是上下文继承机制；不要用它替代 `--session` 续接。
 
@@ -291,7 +302,9 @@ opencode run "$(cat prompts/worker-01.txt)" -m <qualified-id>
   resume_eligible=<$true|$false>
   resumed_from='<original worker dir|>'
   resume_session='<session id|>'
+  resume_mode='<rework|recovery|>'
+  rework_index=<n>
 } | ConvertTo-Json -Compress | Add-Content "$HOME/.ocsr/dispatch-log.jsonl"
 ```
 
-> 条件字段（`label`、`note`、`timeout_policy_*`、`forbid_paths`、`read_audit`、看门狗状态组、返工续接组）仅在非空或已触发时写入；`worker_state` 与期限在启动时先写 `launched`，随后由 `dispatch --watch` 的看护闭环推进；session 与恢复组由看护闭环产生，`resumed_from` / `resume_session` 由 `--resume-from` 派发写入，含义见“失败看护与切换”与“接续原会话（返工）”。
+> 条件字段（`label`、`note`、`timeout_policy_*`、`forbid_paths`、`read_audit`、看门狗状态组、返工续接组）仅在非空或已触发时写入；`worker_state` 与期限在启动时先写 `launched`，随后由 `dispatch --watch` 的看护闭环推进；session 与恢复组由看护闭环产生，`resumed_from` / `resume_session` / `resume_mode` / `rework_index` 由 `--resume-from` 派发写入，含义见“失败看护与切换”与“接续原会话（返工）”。
