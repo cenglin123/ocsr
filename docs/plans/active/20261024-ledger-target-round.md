@@ -1,6 +1,7 @@
 # ledger 增加 target_round 透传（converge 轮次可统计化）
 
-- 状态：active
+- 状态：done（2026-10-24，独立 fresh reviewer ACCEPT，341 passed + verify 13/13）
+- 实施 commit：`d6984a477777c2609b4478bce098d98da97461ac`
 - 分支：`agent/ledger-target-round`
 - 来源：Obsidian 库 converge 度量基线（`converge_metrics.py`）发现 3 个历史收敛目录的轮次信息仅存于 `ocsr-dispatch-ledger.jsonl`，而 ledger 无 `target_round` 字段，轮次不可统计。
 
