@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-10-24
+
+### ledger 增加 target_round 透传
+
+#### 变更内容
+- `dispatch --meta target_round=N` 识别 converge 主循环轮次，仅接受正整数；非法值在派发前报错并返回 1。
+- 合法值以 int 写入 ledger 的 `launched` 与 `landed` 行，供下游轮次统计；`refs/converge-integration.md` 补充用法示例。
+
+#### 迁移影响
+- 无配置变更。未传 `target_round` 时账本行不新增字段，既有行为不变。
+
 ## 2026-10-18
 
 ### 续接前校验原工作目录（cwd）

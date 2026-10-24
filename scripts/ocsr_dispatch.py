@@ -1416,6 +1416,7 @@ def _dispatch_batch(
     scope: str = "",
     blocking_chain: list[str] | None = None,
     converge_invocation_id: str = "",
+    target_round: int | None = None,
     total_timeout_min: int | None = None,
     renewal_minutes: int | None = None,
     max_renewals: int = DEFAULT_MAX_RENEWALS,
@@ -1589,6 +1590,8 @@ def _dispatch_batch(
         }
         if converge_invocation_id:
             launched_row["converge_invocation_id"] = converge_invocation_id
+        if target_round is not None:
+            launched_row["target_round"] = target_round
         if forbid_paths:
             launched_row["forbid_paths"] = len(forbid_paths)
         _append_dispatch_ledger(ledger, launched_row)
@@ -1605,6 +1608,7 @@ def _dispatch_batch(
                          timeout_policy=resolved_policy,
                          timeout_policy_requested=requested_policy,
                          converge_invocation_id=converge_invocation_id,
+                         target_round=target_round,
                          forbid_paths=forbid_paths,
                          total_timeout_min=total_timeout_min,
                          renewal_minutes=renewal_minutes,
@@ -1661,6 +1665,13 @@ def cmd_dispatch(args) -> int:
     bc_raw = meta.get("blocking_chain", "")
     blocking_chain = [x.strip() for x in bc_raw.split(",") if x.strip()] if bc_raw else []
     converge_invocation_id = meta.get("converge-invocation-id", "")
+    target_round = None
+    if "target_round" in meta:
+        target_round_raw = meta["target_round"]
+        if not re.fullmatch(r"[0-9]+", target_round_raw) or int(target_round_raw) <= 0:
+            print(f"❌ --meta target_round 必须为正整数: {target_round_raw!r}", file=sys.stderr)
+            return 1
+        target_round = int(target_round_raw)
     requested_attempt = getattr(args, "attempt_index", None)
     recovery_safe = bool(getattr(args, "recovery_safe", False))
 
@@ -1827,6 +1838,7 @@ def cmd_dispatch(args) -> int:
         scope=scope,
         blocking_chain=blocking_chain,
         converge_invocation_id=converge_invocation_id,
+        target_round=target_round,
         total_timeout_min=getattr(args, "total_timeout", None),
         renewal_minutes=getattr(args, "renewal_minutes", None),
         max_renewals=getattr(args, "max_renewals", DEFAULT_MAX_RENEWALS),
@@ -1961,6 +1973,7 @@ def _watch_loop(
     timeout_policy: str = TIMEOUT_POLICY_LEAF_KILL,
     timeout_policy_requested: str = "",
     converge_invocation_id: str = "",
+    target_round: int | None = None,
     forbid_paths: list[str] | None = None,
     total_timeout_min: int | None = None,
     renewal_minutes: int | None = None,
@@ -2111,6 +2124,8 @@ def _watch_loop(
                 }
                 if converge_invocation_id:
                     landed_row["converge_invocation_id"] = converge_invocation_id
+                if target_round is not None:
+                    landed_row["target_round"] = target_round
                 if land_meta.get("pre_existed"):
                     landed_row["size_before"] = land_meta["size_before"]
                     landed_row["mtime_ns_before"] = land_meta["mtime_ns_before"]
