@@ -15,8 +15,11 @@ python <converge-scripts>/ocsr_spawn_adapter.py dispatch \
   --prompt <abs prompt path> \
   --model <qualified-id> --label r1-reviewer \
   --output-dir <active-dir> --output-name round-1.md \
+  --meta target_round=1 \
   --watch --timeout 20
 ```
+
+`--meta target_round=<N>` 将正整数轮次写入 ledger 的 `launched` 与 `landed` 行，供下游轮次统计；其值应与 converge 主循环的 round 编号一致。
 
 适配层定位与 [SKILL.md 的执行后端边界](../SKILL.md)一致——它是 **converge 仓库侧** 的薄包装，**不**向 `ocsr_dispatch.py` 注入 converge 协议。本仓库（ocsr）的 `ocsr_dispatch.py` 保持框架无关，converge 是它的客户之一。
 

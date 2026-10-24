@@ -1,9 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-10-18
+更新时间：2026-10-24
 
 ## 当前状态
 
+- 2026-10-24 `dispatch --meta target_round=N` 已落地：仅接受正整数，非法值在派发前 fail-closed；合法值以 int 透传到 ledger 的 `launched` 与 `landed` 行，未传时不写该字段。用法见 `refs/converge-integration.md`。341 passed，`verify_ocsr_skill.py` 13 项全过，`agent_links.py check` 与 `audit.py check` 通过。
 - 2026-10-18 `--resume-from` 增加原工作目录校验：launcher 把 worker 工作目录写入 `session-binding.json` 的 `cwd`；续接前若原目录已删除则拒绝并提示用 `git worktree add <路径>` 重建或新开 worker，旧派发无 `cwd` 记录时只警告「无法核对原工作目录，若已删除接续会失败」，当前 cwd 与原 `cwd` 不同时提示「opencode 会在原工作目录 <路径> 打开会话；请在返工提示词里写明要改的目录」。接续成功的新绑定沿用原 `cwd`。行为见 `refs/dispatch-patterns.md`「接续原会话（返工）」与 `docs/pitfalls.md`「opencode 会话绑定原工作目录」。335 passed，`verify_ocsr_skill.py` 13 项全过，`agent_links.py check` 与 `audit.py check` 通过。
 - 2026-10-18 `dispatch --resume-from <原 worker 派发目录>` 已落地：接续原会话按原目录状态自动区分两种模式。**返工（rework）**：`worker-state.json` 为 `landed`，或无 `worker-state.json`/仅启动态且 `start.marker` 为 `exit=0`；沿用原 `attempt_index`（缺失按 1），`rework_index` + 1（缺失按 0 起），上限 3 轮，超限拒绝并要求新开 worker。**故障恢复（recovery）**：非 0 退出、无 exit 记录或 `timed_out`/`stopped`/`failed` 等；`attempt_index` + 1，三次总上限，原目录缺 `attempt_index` 时必须显式传 `--attempt-index`。返工模式传 `--attempt-index`、恢复模式传 `--rework-index` 均拒绝；原目录缺 `rework_index` 可用 `--rework-index` 显式指定（须大于原值且 ≤3）。只允许单个 worker；原派发模型从原目录 `launcher.ps1` 核对（无法核对即拒绝），换模型必须新开；`session-binding.json` 须有合法唯一 session ID；旧进程按 `process-identity.json` 的 PID + 创建时间确认已退出（PID 复用视为已退出，进程表不可读或身份不一致则拒绝），且不得有仍以该 PID 为父的存活后代。launcher 以 `--standalone --session <id> -m <model>` 启动，照常走看门狗/产物验收/ledger/telemetry；账本与遥测记录 `resumed_from`、`resume_session`、`resume_mode`、`rework_index`，账本另记 `attempt_index`；`worker-state.json`（watch 与非 watch）同样记录模式与两种计数。新会话仍写新的 `session-binding.json`，返回 sessionID 不同时照实记录并提示（回读仅在 `--watch` 路径执行）。行为细则见 `refs/dispatch-patterns.md`「接续原会话（返工）」与「失败切换阶梯」。329 passed，`verify_ocsr_skill.py` 13 项全过，`agent_links.py check` 与 `audit.py check` 通过。
 - 2026-10-18 worker 改用 `opencode run --standalone`（launcher 与 resume_argv）：常驻后台服务按目录残留 MCP 子进程、占住派发目录的问题见 `docs/pitfalls.md`「opencode 常驻后台服务」。实测：默认方式跑过的目录删不掉、standalone 可删；三个 standalone 并行正常；standalone 会话可续接；真实派发 30 秒内退出、无残留。302 passed、verify 13 项全过。

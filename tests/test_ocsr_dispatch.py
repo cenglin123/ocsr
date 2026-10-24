@@ -16,6 +16,7 @@ import textwrap
 import time
 import unittest.mock as mock
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1767,6 +1768,88 @@ class TestConvergeInvocationId:
     def test_ocsr_framework_independence_no_converge_import(self):
         source = SCRIPT.read_text(encoding="utf-8")
         assert "import converge" not in source.lower()
+
+
+class TestTargetRound:
+    """target_round 由 --meta 校验并透传到 launched/landed 账本行。"""
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(mod, "ALLOWED_MODELS", frozenset({"vendor/model-a"}))
+        monkeypatch.setattr(mod, "_check_model_calls_disabled", lambda: None)
+        monkeypatch.setattr(mod, "_lookup_model_cost",
+                            lambda _m: {"input": 0.0, "output": 0.0})
+        monkeypatch.setattr(mod, "_query_process_table", lambda: {})
+        monkeypatch.setattr(mod, "DISPATCH_LOG", tmp_path / "dispatch-log.jsonl")
+        self.launched: list[Path] = []
+        monkeypatch.setattr(mod, "_launch_worker",
+                            lambda wd: self.launched.append(wd) or 1234)
+
+    def _args(self, tmp_path: Path) -> SimpleNamespace:
+        prompt = tmp_path / "prompt.txt"
+        prompt.write_text("test\n", encoding="utf-8")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir(exist_ok=True)
+        return SimpleNamespace(
+            worker=[f"{prompt}|vendor/model-a|w1"],
+            output_dir=str(out_dir), output_pattern="{label}.md",
+            stagger=0, timeout=15, timeout_policy=mod.TIMEOUT_POLICY_LEAF_KILL,
+            watch=False, progress=False, work_dir=str(tmp_path / "work"),
+            harness="test", meta=[], ledger_dir=str(tmp_path / "ledger"),
+            forbid_paths=[], attempt_index=None, rework_index=None,
+            recovery_safe=False, resume_from="",
+        )
+
+    def _ledger_rows(self, tmp_path: Path) -> list[dict]:
+        ledger = tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME
+        return [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+
+    def _run_watch(self, tmp_path: Path, target_round: int | None = None) -> dict:
+        wd = tmp_path / "watch-worker"
+        wd.mkdir()
+        output = tmp_path / "landed.md"
+        output.write_text("# report\n", encoding="utf-8")
+        (wd / "start.marker").write_text("exit=0\n", encoding="utf-8")
+        parsed = [{"output": output, "label": "w1", "model": "vendor/model-a",
+                   "prompt_size_bytes": 4, "work_dir": wd}]
+        ledger = tmp_path / "watch-ledger.jsonl"
+        rc = mod._watch_loop(
+            parsed, [time.time()], timeout_min=1, progress=False,
+            ledger=ledger, snapshot_before={}, target_round=target_round,
+        )
+        assert rc == 0
+        return json.loads(ledger.read_text(encoding="utf-8"))
+
+    def test_target_round_in_launched_ledger(self, tmp_path):
+        args = self._args(tmp_path)
+        args.meta = ["target_round=3"]
+        assert mod.cmd_dispatch(args) == 0
+        rows = self._ledger_rows(tmp_path)
+        assert [row["event"] for row in rows] == ["launched"]
+        assert rows[0]["target_round"] == 3
+        assert isinstance(rows[0]["target_round"], int)
+
+    def test_target_round_in_landed_ledger(self, tmp_path):
+        row = self._run_watch(tmp_path, target_round=2)
+        assert row["event"] == "landed"
+        assert row["target_round"] == 2
+        assert isinstance(row["target_round"], int)
+
+    @pytest.mark.parametrize("value", ["abc", "0", "-1"])
+    def test_invalid_target_round_rejected_before_dispatch(self, tmp_path, capsys, value):
+        args = self._args(tmp_path)
+        args.meta = [f"target_round={value}"]
+        assert mod.cmd_dispatch(args) == 1
+        assert "target_round 必须为正整数" in capsys.readouterr().err
+        assert self.launched == []
+        assert not (tmp_path / "ledger" / mod.CONVERGE_LEDGER_NAME).exists()
+
+    def test_target_round_omitted_without_meta(self, tmp_path):
+        args = self._args(tmp_path)
+        assert mod.cmd_dispatch(args) == 0
+        assert all("target_round" not in row for row in self._ledger_rows(tmp_path))
+        assert "target_round" not in self._run_watch(tmp_path)
 
 
 # ─── 测试 30: 自动超时策略解析 ─────────────────────────────────────────
