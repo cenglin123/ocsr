@@ -30,6 +30,7 @@ ocsr_dispatch.py — ocsr (OpenCode Subagents Run) 派发后端（库内执行�
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
 import hashlib
 import json
@@ -292,6 +293,10 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
     服务按工作目录常驻 MCP 子进程且不随 run 结束释放，worker 目录因此被占用、无法删除。
     """
     command_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # Embed the helper so dispatched launchers remain self-contained across
+    # skill updates. The job is owned by pwsh, never by the dispatcher.
+    job_source = (Path(__file__).with_name("ocsr_launcher_job.cs")).read_bytes()
+    job_source_b64 = base64.b64encode(job_source).decode("ascii")
     worker_cwd = cwd or str(Path.cwd())
     cwd_literal = worker_cwd.replace("'", "''")
     return textwrap.dedent(f"""\
@@ -308,6 +313,11 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
         $identity | ConvertTo-Json -Compress | Set-Content "$PSScriptRoot/process-identity.json" -Encoding UTF8
         "pwsh started $(Get-Date -Format o)" | Set-Content "$PSScriptRoot/start.marker"
         try {{
+          if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {{
+            $jobSource = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{job_source_b64}'))
+            Add-Type -TypeDefinition $jobSource -ErrorAction Stop
+            [OcsrLauncherJob]::AttachCurrentProcess()
+          }}
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
           $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
           & opencode run $prompt --format json --standalone {text} 2>&1 | ForEach-Object {{

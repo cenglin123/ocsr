@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-10-31
+
+### Windows launcher 退出时清理所属进程树
+
+#### 变更内容
+- launcher 在启动 OpenCode 前创建并加入 `KILL_ON_JOB_CLOSE` Job，唯一非继承句柄由 launcher 持有，正常或异常退出均清理 Job 内后代；dispatcher 退出仍保留脱管 worker。
+- 新增 `scripts/ocsr_launcher_job.cs`，生成 launcher 时嵌入源码，不依赖运行期间的技能目录。初始化/绑定失败沿既有 `error.log` 与 `exit=1` marker 契约阻止模型调用。
+- 新增 6 项 Windows 离线回归，覆盖正常/异常退出、多层后代、兄弟进程隔离、脱管，以及 PowerShell/原生配置/绑定失败；完整回归 347 passed。真实 OpenCode/MCP 正常与异常退出无追踪进程残留，独立 fresh 复查 ACCEPT。
+
+#### 迁移影响
+- 只对新生成的 launcher 生效，不追溯清理旧 worker 或已有共享服务。
+- worker 内启动的后台进程也随 launcher 结束；需要长期运行的服务须由独立宿主管理。受限宿主拒绝 Job 绑定时会明确失败，不退回无生命周期约束的启动方式。
+
 ## 2026-10-24
 
 ### ledger 增加 target_round 透传
