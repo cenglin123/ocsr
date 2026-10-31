@@ -25,6 +25,8 @@ harness 前台超时不足、后台通道 kill、模型端静默停滞的具名�
 
 opencode 2.x 的 `opencode run` 默认连接常驻后台服务（`opencode-cli serve --service`，桌面版启动或首个 run 拉起），服务为每个新工作目录常驻一对 MCP 子进程（配置里的 Playwright、cua 等），run 结束后不释放；派发目录因此被占用、无法删除（git worktree 任务目录尤其明显），且每派发一个新目录多一对进程。launcher 因此一律加 `--standalone`（私有服务器，随 run 退出；会话仍可用 `--session` 续接）。已残留的进程要 `opencode service restart` 或退出桌面版后结束服务才释放。
 
+Windows launcher 在调用 OpenCode 前把自身加入带 `KILL_ON_JOB_CLOSE` 的 Job Object，唯一非继承句柄由 launcher 持有。launcher 正常或异常退出时，Job 内后代随之终止；dispatcher 退出不关闭该句柄，因此不影响脱管 worker。Job 初始化或绑定失败时写 `error.log` 与 `exit=1`，不调用 OpenCode。helper 源码嵌入生成的 launcher，运行中的 worker 不依赖技能目录后续更新。worker 内启动的后台进程也受此生命周期约束；需要长期保留的服务应由独立宿主管理。Job 不提供安全沙箱，不覆盖既有共享服务或经外部服务创建的进程；旧版已启动的 launcher 不会被追溯绑定。
+
 ## opencode 会话绑定原工作目录
 
 `opencode run --session <id>` 打开的是会话创建时的工作目录。原目录被删除（例如 worktree 合入后清理）时，续接会以 `Location not found: <原目录>` 退出（exit=1），而不是在当前目录继续。launcher 因此把 worker 的工作目录写入 `session-binding.json` 的 `cwd`（绝对路径）；`--resume-from` 在启动前校验：目录不存在则拒绝并提示在原路径重建（如 `git worktree add <路径>`）或新开 worker；旧派发没有 `cwd` 记录时只提示无法核对，不阻止。当前 cwd 与原 `cwd` 不同时允许续接，但要在返工提示词里写明实际要改的目录。续接成功的新绑定沿用原 `cwd`。

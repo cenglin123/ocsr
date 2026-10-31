@@ -1,8 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-10-24
+更新时间：2026-10-31
 
 ## 当前状态
+
+- Windows launcher 后代生命周期修复已验收：launcher 自持非继承 `KILL_ON_JOB_CLOSE` Job 句柄，OpenCode 启动前绑定，失败关闭派发；不改变 dispatcher 脱管和恢复计数。计划见 `docs/plans/active/20261031-launcher-job-lifecycle.md`。347 passed（新增 6 项离线进程回归），verify 13/13、agent_links、audit 通过；真实 OpenCode 正常退出 14 个追踪进程、仅杀 launcher 后 13 个追踪进程均无残留。独立 fresh reviewer（deepseek/deepseek-flash）ACCEPT，无 P1/P2；报告 `.review/mcp-job-fix-20261031/reviewer-2/acceptance.md`。修复仅作用于之后新生成的 launcher；分支尚未合入和部署各宿主。
 
 - 2026-10-24 `dispatch --meta target_round=N` 已落地：仅接受正整数，非法值在派发前 fail-closed；合法值以 int 透传到 ledger 的 `launched` 与 `landed` 行，未传时不写该字段。用法见 `refs/converge-integration.md`。341 passed，`verify_ocsr_skill.py` 13 项全过，`agent_links.py check` 与 `audit.py check` 通过。
 - 2026-10-18 `--resume-from` 增加原工作目录校验：launcher 把 worker 工作目录写入 `session-binding.json` 的 `cwd`；续接前若原目录已删除则拒绝并提示用 `git worktree add <路径>` 重建或新开 worker，旧派发无 `cwd` 记录时只警告「无法核对原工作目录，若已删除接续会失败」，当前 cwd 与原 `cwd` 不同时提示「opencode 会在原工作目录 <路径> 打开会话；请在返工提示词里写明要改的目录」。接续成功的新绑定沿用原 `cwd`。行为见 `refs/dispatch-patterns.md`「接续原会话（返工）」与 `docs/pitfalls.md`「opencode 会话绑定原工作目录」。335 passed，`verify_ocsr_skill.py` 13 项全过，`agent_links.py check` 与 `audit.py check` 通过。
