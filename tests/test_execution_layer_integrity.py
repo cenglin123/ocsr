@@ -437,6 +437,72 @@ class TestDbLockRecoveryHandoff:
 class TestWatchdogSessionRecovery:
     """20260911 watchdog/session recovery contract boundaries; all deterministic."""
 
+    def test_diagnostic_file_failure_does_not_prevent_timeout_accounting(self, tmp_path, capsys):
+        worker = _worker(tmp_path, "diagnostic-io", marker="")
+        ledger = tmp_path / "ledger.jsonl"
+        original_write = mod._write_utf8
+
+        def failing_write(path, text):
+            if path.name == "diagnostic.json":
+                raise PermissionError("injected diagnostic failure")
+            return original_write(path, text)
+
+        with mock.patch.object(mod, "_write_utf8", side_effect=failing_write):
+            rc, _ = _run_watch(tmp_path, [worker], timeout_min=1, started_ago=600,
+                               total_timeout_min=1, max_renewals=0, ledger=ledger)
+        assert rc == 1
+        state = json.loads((worker["work_dir"] / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["state"] == "stopped"
+        assert state["diagnostic_written"] is False
+        rows = [json.loads(row) for row in ledger.read_text(encoding="utf-8").split("\n") if row]
+        assert rows[-1]["event"] == "stopped"
+        assert rows[-1]["diagnostic_written"] is False
+        assert "diagnostic_file" not in rows[-1]
+        console = capsys.readouterr().out
+        assert "诊断文件未写入" in console
+        assert str(worker["work_dir"] / "diagnostic.json") not in console
+
+    def test_timeout_console_shows_all_log_quality_signals(self, tmp_path, capsys):
+        worker = _worker(tmp_path, "diagnostic-quality", marker="")
+        (worker["work_dir"] / "run.log").write_bytes(b'\xff\nwarning\n{"bad": }\n{"partial":')
+        rc, _ = _run_watch(tmp_path, [worker], timeout_min=1, started_ago=600,
+                           total_timeout_min=1, max_renewals=0)
+        console = capsys.readouterr().out
+        assert rc == 1
+        assert "日志=damaged" in console
+        assert "JSON坏行=1" in console
+        assert "非法UTF8行=1" in console
+        assert "非事件行=1" in console
+        assert "尾行未完成=True" in console
+
+    def test_stderr_database_lock_still_requires_explicit_recovery(self, tmp_path):
+        worker = _worker(tmp_path, "stderr-lock", marker="exit=1\n")
+        (worker["work_dir"] / "stderr.log").write_text("database is locked\n", encoding="utf-8")
+        ledger = tmp_path / "ledger.jsonl"
+        rc, _ = _run_watch(tmp_path, [worker], ledger=ledger)
+        rows = [json.loads(row) for row in ledger.read_text(encoding="utf-8").split("\n") if row]
+        assert rc == mod.EXIT_DETERMINISTIC_FAILURE
+        assert any(row.get("event") == "recovery_required" for row in rows)
+
+    def test_timeout_records_policy_cancellation_and_log_damage(self, tmp_path):
+        worker = _worker(tmp_path, "diagnostic", marker="")
+        (worker["work_dir"] / "run.log").write_text(
+            '{"type":"step_start","timestamp":1234}\n{"bad": }\n', encoding="utf-8")
+        ledger = tmp_path / "ledger.jsonl"
+        rc, _ = _run_watch(tmp_path, [worker], timeout_min=1, started_ago=600,
+                           total_timeout_min=1, max_renewals=0, ledger=ledger)
+        diagnostic = json.loads((worker["work_dir"] / "diagnostic.json").read_text(encoding="utf-8"))
+        assert rc == 1
+        assert diagnostic["termination_cause"] == "deadline_policy"
+        assert diagnostic["deadline_basis"] == "total_deadline"
+        assert diagnostic["root_cause"] == "unknown"
+        assert diagnostic["last_phase"] == "generation_pending"
+        assert diagnostic["log"]["json_errors"] == 1
+        state = json.loads((worker["work_dir"] / "worker-state.json").read_text(encoding="utf-8"))
+        assert state["diagnostic"] == diagnostic
+        rows = [json.loads(row) for row in ledger.read_text(encoding="utf-8").split("\n") if row]
+        assert rows[-1]["diagnostic"] == diagnostic
+
     def test_launcher_uses_json_and_binds_only_unique_session(self):
         launcher = mod._pwsh_code("-m vendor/model --title worker")
         assert "opencode run $prompt --format json" in launcher

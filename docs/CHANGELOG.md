@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026-11-01
+
+### UTF-8 输出与超时诊断
+
+#### 变更内容
+- launcher 明确原生 stdout 的 UTF-8 解码，stderr 独立落盘；进程失败与 preflight 同时读取两类日志，保留真实退出码与唯一 session 绑定。
+- JSONL 按 LF 分帧，显式报告坏 JSON、非法 UTF-8、非事件行与未完成尾行，不以替换字符吞掉损坏；Unicode 行分隔符不再切断字符串内事件。
+- 新增只读 `diagnose --worker-dir` 与可选 `--session-db`；watcher 可显式传 `--diagnostic-session-db`。只查询已验证绑定的精确会话、本次启动后的 assistant 元数据，不输出推理或工具参数正文。数据库异常、未知结构明确降级，阶段名称区分消息步骤结束与产物验收。
+- 到期终止/交回生成 `diagnostic.json` 并内嵌到 state/ledger，记录策略依据、最后观测来源与时效、日志质量、未知根因；侧车写盘失败显式记账，不宣称文件存在。诊断不参与续期、预算、恢复或完成裁决。
+- 407 项离线回归通过，包括 CP936 下原生 UTF-8 正反对照、会话绑定、stderr/preflight、元数据隔离、阶段一致性与诊断写入失败降级。真实短调用 8 条事件无解析损坏；历史 MiMo 证据保持不变并能回查 write 参数生成状态。
+
+#### 迁移影响
+- 输出编码和 stderr 分离只作用于新生成的 launcher，旧日志不自动重编码。
+- 数据库诊断默认关闭，仅适配已核对的 OpenCode v2 schema，使用 Python 标准库 sqlite3；查询失败不改变派发决策。遥测 schema 与 `stall` 分类保持兼容，超时不代表已证明服务端停滞。
+
 ## 2026-10-31
 
 ### Windows launcher 退出时清理所属进程树
