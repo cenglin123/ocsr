@@ -15,6 +15,10 @@
 
 PowerShell 5.1、PowerShell 7、终端显示和文件字节是不同层。先以 UTF-8 显式重读并检查原始字节，再决定是否修复文件。不要用 `>` 生成需要被其他工具读取的 UTF-8 文本。
 
+原生命令输出经过 PowerShell 管道时，文件写入 UTF-8 不等于上游解码正确：`[Console]::OutputEncoding` 决定原生 stdout 的解码；`$OutputEncoding` 控制通过管道向原生命令发送字符串时的编码，launcher 将两者设为 UTF-8。JSONL 只按 LF 分帧，不能用会切开字符串内 U+2028/U+0085 的 `splitlines()`。诊断分别统计完整坏 JSON、非事件行、非法 UTF-8 和未完成尾行；历史乱码不能靠替换解码静默修复。
+
+CLI 只暴露部分事件，日志静止不能证明服务端停滞。超时表示时限策略触发；最后阶段与根因分开报告，缺乏证据时根因保持 unknown。只读诊断入口与数据库限制见 [deployment.md](deployment.md)「运行诊断」。
+
 ## 调用成本
 
 主模型的内建子代理通常继承主模型，可能快速消耗高价 usage。需要廉价执行或异构 reviewer 时使用 OCSR 指定模型；派发前披露调用数上限，失败不能无限重派。

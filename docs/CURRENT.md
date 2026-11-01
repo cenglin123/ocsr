@@ -1,8 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-10-31
+更新时间：2026-11-01
 
 ## 当前状态
+
+- 输出编码与超时诊断修复完成，验收见 `docs/plans/active/20261101-output-diagnostics.md`。UTF-8 native 管道与 stderr 分离、可观测 JSONL 解析、只读精确会话诊断及 watcher 策略摘要已落地；407 passed，verify 13/13、agent_links、audit、diff/eol/新增路径隐私检查通过。真实短调用 8 条事件无损，历史 MiMo 证据只读回查通过。两轮 fresh DeepSeek 静态复查均为 REVISE，有效发现逐项修补并补回归，最终修补由主会话验收，未追加模型复评；原报告与读路径审计保存在 `.review/output-diagnostics-20261101/`。调用预算 5/5。GitHub 交付采用特性分支 PR squash；宿主副本须经 cc-switch 更新部署后使用。
 
 - Windows launcher 后代生命周期修复已验收：launcher 自持非继承 `KILL_ON_JOB_CLOSE` Job 句柄，OpenCode 启动前绑定，失败关闭派发；不改变 dispatcher 脱管和恢复计数。计划见 `docs/plans/active/20261031-launcher-job-lifecycle.md`。347 passed（新增 6 项离线进程回归），verify 13/13、agent_links、audit 通过；真实 OpenCode 正常退出 14 个追踪进程、仅杀 launcher 后 13 个追踪进程均无残留。独立 fresh reviewer（deepseek/deepseek-flash）ACCEPT，无 P1/P2；报告 `.review/mcp-job-fix-20261031/reviewer-2/acceptance.md`。修复仅作用于之后新生成的 launcher；各宿主副本须经 cc-switch 更新部署后使用。
 

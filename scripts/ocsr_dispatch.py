@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -253,7 +254,7 @@ def _sanitize_path(val: str) -> str:
 
 def _sanitize_ledger_row(row: dict) -> dict:
     """Sanitize path-like string values in a ledger row."""
-    PATH_KEYS = {"prompt_file", "expected_output", "work_dir", "output", "detail", "resumed_from"}
+    PATH_KEYS = {"prompt_file", "expected_output", "work_dir", "output", "detail", "resumed_from", "diagnostic_file"}
     result = {}
     for k, v in row.items():
         if isinstance(v, str) and k in PATH_KEYS:
@@ -313,6 +314,8 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
         $identity | ConvertTo-Json -Compress | Set-Content "$PSScriptRoot/process-identity.json" -Encoding UTF8
         "pwsh started $(Get-Date -Format o)" | Set-Content "$PSScriptRoot/start.marker"
         try {{
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [Console]::OutputEncoding
           if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {{
             $jobSource = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{job_source_b64}'))
             Add-Type -TypeDefinition $jobSource -ErrorAction Stop
@@ -320,7 +323,7 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
           }}
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
           $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
-          & opencode run $prompt --format json --standalone {text} 2>&1 | ForEach-Object {{
+          & opencode run $prompt --format json --standalone {text} 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
             $line = [string]$_
             $line | Add-Content "$PSScriptRoot/run.log" -Encoding UTF8
             try {{
@@ -349,7 +352,7 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
           }}
           "exit=$opencodeExit" | Add-Content "$PSScriptRoot/start.marker"
         }} catch {{
-          $_ | Out-File "$PSScriptRoot/error.log"
+          $_ | Out-File "$PSScriptRoot/error.log" -Encoding UTF8
           "exit=1" | Add-Content "$PSScriptRoot/start.marker"
         }}
     """)
@@ -430,22 +433,59 @@ def _read_json_object(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def _read_event_log(log_file: Path) -> tuple[list[dict], dict]:
+    """LF-framed UTF-8 JSONL; retain evidence of damage instead of replacing bytes."""
+    events: list[dict] = []
+    quality = {"status": "ok", "json_event_count": 0, "json_errors": 0,
+               "non_json_lines": 0, "partial_line": False, "invalid_utf8_lines": 0}
+    try:
+        raw = log_file.read_bytes()
+    except OSError:
+        quality["status"] = "missing" if not log_file.exists() else "unreadable"
+        return events, quality
+    raw = raw.removeprefix(b"\xef\xbb\xbf")
+    lines = raw.split(b"\n")
+    def reject_constant(_value: str):
+        raise ValueError("Non-finite JSON constant")
+
+    for index, chunk in enumerate(lines):
+        if not chunk.strip():
+            continue
+        try:
+            line = chunk.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            if index == len(lines) - 1 and not raw.endswith(b"\n"):
+                quality["partial_line"] = True
+            else:
+                quality["invalid_utf8_lines"] += 1
+            continue
+        try:
+            event = json.loads(line, parse_constant=reject_constant)
+        except (ValueError, RecursionError):
+            if index == len(lines) - 1 and not raw.endswith(b"\n"):
+                quality["partial_line"] = True
+            elif line.startswith(("{", "[")):
+                quality["json_errors"] += 1
+            else:
+                quality["non_json_lines"] += 1
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+        else:
+            quality["non_json_lines"] += 1
+    quality["json_event_count"] = len(events)
+    if quality["json_errors"] or quality["invalid_utf8_lines"] or quality["non_json_lines"]:
+        quality["status"] = "damaged"
+    return events, quality
+
+
 def _extract_session_ids(log_file: Path) -> tuple[set[str], int, dict | None]:
     """只解析 JSONL 顶层 ``sessionID``，同时返回有效事件数和最后事件。"""
     ids: set[str] = set()
     event_count = 0
     last_event: dict | None = None
-    try:
-        lines = log_file.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-    except OSError:
-        return ids, event_count, last_event
-    for line in lines:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
+    events, _quality = _read_event_log(log_file)
+    for event in events:
         event_count += 1
         last_event = event
         candidate = event.get("sessionID")
@@ -775,37 +815,33 @@ def _event_timestamp(event: dict) -> object | None:
     return None
 
 
+def _tool_event_observation(event: dict) -> dict | None:
+    """Shared CLI status fallback; unknown values remain unknown, never coerced."""
+    part = event.get("part") if isinstance(event.get("part"), dict) else event
+    event_type = str(part.get("type") or event.get("type") or "").lower().replace("-", "_")
+    tool_name = part.get("tool") or part.get("name") or event.get("tool")
+    if event_type not in {"tool", "tool_use", "tool_update"} and not tool_name:
+        return None
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    status = state.get("status") or part.get("status") or event.get("status")
+    return {"tool": str(tool_name or "unknown"),
+            "status": status if isinstance(status, str) else "unknown",
+            "call_id": str(part.get("callID") or part.get("call_id") or "")}
+
+
 def _event_runtime_status(log_file: Path) -> tuple[object | None, dict, dict]:
     """返回最近事件时间、最近工具状态和最近子代理工具状态。"""
     latest_timestamp: object | None = None
     latest_tool: dict = {"status": "not_observed"}
     latest_subagent: dict = {"status": "not_observed"}
-    try:
-        lines = log_file.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-    except OSError:
-        return latest_timestamp, latest_tool, latest_subagent
-    for line in lines:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
+    events, _quality = _read_event_log(log_file)
+    for event in events:
         timestamp = _event_timestamp(event)
         if timestamp is not None:
             latest_timestamp = timestamp
-        part = event.get("part") if isinstance(event.get("part"), dict) else event
-        event_type = str(part.get("type") or event.get("type") or "").lower().replace("-", "_")
-        tool_name = part.get("tool") or event.get("tool")
-        if event_type not in {"tool", "tool_use", "tool_update"} and not tool_name:
+        observation = _tool_event_observation(event)
+        if observation is None:
             continue
-        state = part.get("state") if isinstance(part.get("state"), dict) else {}
-        status = state.get("status") or part.get("status") or event.get("status") or "unknown"
-        observation = {
-            "tool": str(tool_name or "unknown"),
-            "status": str(status),
-            "call_id": str(part.get("callID") or part.get("call_id") or ""),
-        }
         latest_tool = observation
         normalized_tool = observation["tool"].lower().replace("-", "_")
         if normalized_tool in {"task", "agent", "subagent", "sub_agent"} or "subagent" in normalized_tool:
@@ -824,6 +860,166 @@ def _snapshot_progress_baseline(snapshot: dict) -> dict:
         "latest_file_change_ns": snapshot.get("latest_file_change_ns", 0),
         "artifact_state": snapshot.get("artifact_state", "missing"),
     }
+
+
+def _timestamp_seconds(value: object) -> float | None:
+    """Normalize event timestamps without substituting filesystem modification time."""
+    try:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            result = float(value)
+            if not 0 < result < 1e16:
+                return None
+            return result / 1000 if result > 1e11 else result
+        parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.timestamp() if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _read_native_session_metadata(wd: Path, session_db: Path) -> dict:
+    """Explicit, read-only OpenCode v2 metadata lookup; never infer a session ID.
+
+    SQL projects only state/timing/length metadata: no reasoning, tool input or
+    output bodies are returned to Python or included in diagnostic artifacts.
+    """
+    binding_status, sid = _read_session_binding(wd)
+    if binding_status != "available" or not _SESSION_ID_RE.fullmatch(sid):
+        return {"status": "unbound", "binding_status": binding_status}
+    identity = _read_json_object(wd / PROCESS_IDENTITY_FILE) or {}
+    try:
+        started_ms = (int(identity["creation_time"]) - 621355968000000000) // 10000
+        if started_ms <= 0:
+            raise ValueError("invalid launcher time")
+    except (KeyError, ValueError, TypeError):
+        return {"status": "unverified_start_time"}
+    connection = None
+    try:
+        connection = sqlite3.connect(Path(session_db).resolve().as_uri() + "?mode=ro",
+                                     uri=True, timeout=0.25)
+        connection.execute("PRAGMA query_only=ON")
+        probe_deadline = time.monotonic() + 0.5
+        connection.set_progress_handler(lambda: int(time.monotonic() > probe_deadline), 1000)
+        # Correlated json_each projects only the last tool's metadata. An older
+        # assistant from a resumed session must not describe this invocation.
+        row = connection.execute("""
+            SELECT time_created, time_updated,
+                   json_extract(data, '$.time.completed'),
+                   json_extract(data, '$.finish'),
+                   CASE WHEN json_type(data, '$.error') NOT IN ('null') THEN 1 ELSE 0 END,
+                   (SELECT json_object(
+                       'tool', CASE WHEN json_type(value, '$.name') = 'text'
+                           THEN substr(json_extract(value, '$.name'), 1, 80) END,
+                       'status', json_extract(value, '$.state.status'),
+                       'created_at_ms', CASE WHEN json_type(value, '$.time.created') = 'integer'
+                           THEN json_extract(value, '$.time.created') END,
+                       'input_chars', CASE WHEN json_type(value, '$.state.input') = 'text'
+                           THEN length(json_extract(value, '$.state.input')) END)
+                    FROM json_each(data, '$.content')
+                    WHERE json_extract(value, '$.type') = 'tool'
+                    ORDER BY CAST(key AS INTEGER) DESC LIMIT 1),
+                   json_type(data), json_type(data, '$.content'), json_type(data, '$.time')
+            FROM session_message
+            WHERE session_id = ? AND type = 'assistant' AND time_created >= ?
+            ORDER BY seq DESC LIMIT 1
+        """, (sid, started_ms)).fetchone()
+        if row is None:
+            return {"status": "no_current_assistant", "session_id": sid}
+        if (any(isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in row[:2])
+                or tuple(row[6:9]) != ("object", "array", "object")
+                or (row[2] is not None and not isinstance(row[2], (int, float)))
+                or (row[3] is not None and not isinstance(row[3], str))):
+            return {"status": "unavailable_or_unsupported", "reason": "metadata_shape_mismatch"}
+        tool = json.loads(row[5]) if row[5] else {"status": "not_observed"}
+        status = tool.get("status")
+        # Do not expose arbitrary state values, errors or finish text as metadata.
+        tool["status"] = (status if status in {"streaming", "pending", "running", "completed", "error"}
+                          else "unknown") if row[5] else "not_observed"
+        completed = bool(row[2] or row[3])
+        phase = "assistant_step_complete" if completed else "generation_pending"
+        if row[4]:
+            phase = "error_reported"
+        else:
+            phase = {"streaming": "tool_call_streaming", "pending": "tool_pending",
+                     "running": "tool_running", "error": "tool_error_reported"}.get(status, phase)
+        return {"status": "available", "session_id": sid, "source": "opencode_v2",
+                "created_at_ms": row[0], "updated_at_ms": row[1], "step_completed": completed,
+                "last_phase": phase, "tool": tool}
+    except (sqlite3.Error, OSError, ValueError, TypeError, RecursionError, OverflowError) as exc:
+        return {"status": "unavailable_or_unsupported", "error_type": type(exc).__name__,
+                "sqlite_errorname": getattr(exc, "sqlite_errorname", None)}
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _worker_diagnostics(wd: Path, now: float | None = None,
+                        session_db: Path | None = None) -> dict:
+    """Derived evidence, never a diagnosis of provider internals or task success."""
+    now = time.time() if now is None else now
+    events, quality = _read_event_log(wd / "run.log")
+    last = events[-1] if events else {}
+    timestamp = _event_timestamp(last)
+    event_time = _timestamp_seconds(timestamp)
+    kind = str(last.get("type") or "").replace("-", "_")
+    phase_time = event_time
+    phase = {"step_start": "generation_pending", "step_finish": "between_steps",
+             "error": "error_reported", "text": "text_emitted",
+             "reasoning": "reasoning_emitted"}.get(kind, "event_observed_unknown_phase" if events else "not_observed")
+    observation = _tool_event_observation(last)
+    if observation is None and kind in {"step_start", "step_finish"}:
+        for event in reversed(events):
+            recent_tool = _tool_event_observation(event)
+            if recent_tool is not None:
+                if recent_tool["status"] in {"running", "pending", "streaming"}:
+                    observation = recent_tool
+                    phase_time = _timestamp_seconds(_event_timestamp(event))
+                break
+    if observation is not None:
+        phase = {"running": "tool_running", "pending": "tool_pending",
+                 "streaming": "tool_call_streaming", "completed": "tool_completed",
+                 "error": "tool_error_reported"}.get(observation["status"], "tool_state_unknown")
+    result = {"schema_version": 1, "captured_at": now, "log": quality,
+              "last_phase": phase, "phase_source": "cli" if events else "unknown",
+              "last_event_timestamp": timestamp,
+              "last_event_type": kind,
+              "event_age_seconds": max(0, round(now - event_time, 3)) if event_time is not None and event_time <= now else None,
+              "phase_observed_at": phase_time,
+              "phase_age_seconds": max(0, round(now - phase_time, 3)) if phase_time is not None and phase_time <= now else None,
+              "root_cause": "unknown",
+              "observation_limit": "CLI silence does not prove a model hang; generation/queue/network/permission waits may be unobserved.",
+              "native_session": {"status": "not_requested"}}
+    if session_db is not None:
+        native = _read_native_session_metadata(wd, session_db)
+        result["native_session"] = native
+        native_time = _timestamp_seconds(native.get("updated_at_ms"))
+        if (native.get("status") == "available" and native_time is not None and native_time <= now
+                and ((phase_time is not None and native_time >= phase_time)
+                     or (event_time is None and phase in {"not_observed", "event_observed_unknown_phase"}))):
+            result["last_phase"] = native["last_phase"]
+            result["phase_source"] = "session_db"
+            result["phase_observed_at"] = native_time
+            result["phase_age_seconds"] = round(now - native_time, 3)
+    for name in ("run.log", "stderr.log"):
+        try:
+            info = (wd / name).stat()
+            result[name] = {"bytes": info.st_size, "mtime": info.st_mtime}
+        except OSError:
+            result[name] = {"bytes": None, "mtime": None}
+    return result
+
+
+def cmd_diagnose(args) -> int:
+    wd = Path(args.worker_dir)
+    if not wd.is_dir():
+        print("Worker directory does not exist", file=sys.stderr)
+        return 2
+    result = _worker_diagnostics(wd, session_db=Path(args.session_db) if args.session_db else None)
+    # Inspection is read-only: do not rewrite old logs, worker state or evidence.
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _has_auditable_progress(previous: dict, current: dict) -> bool:
@@ -1438,6 +1634,7 @@ def _dispatch_batch(
     resume_mode: str = "",
     rework_index: int = 0,
     binding_cwd: str = "",
+    diagnostic_session_db: Path | None = None,
 ) -> int:
     """派发内核：**已解析完毕**的 worker 批次 → 退出码。
 
@@ -1624,7 +1821,8 @@ def _dispatch_batch(
                          renewal_minutes=renewal_minutes,
                          max_renewals=max_renewals,
                          recovery_safe=recovery_safe,
-                         attempt_index=attempt_index)
+                         attempt_index=attempt_index,
+                         diagnostic_session_db=diagnostic_session_db)
         _record_resume_session(parsed, ledger)
         if _collision_report(output_dir, snapshot_before, expected_names, ledger,
                               allow_overwrite=frozenset(allow_overwrite or ())):
@@ -1860,6 +2058,8 @@ def cmd_dispatch(args) -> int:
         resume_mode=resume_mode,
         rework_index=rework_index,
         binding_cwd=binding_cwd,
+        diagnostic_session_db=(Path(args.diagnostic_session_db)
+                               if getattr(args, "diagnostic_session_db", None) else None),
     )
 
 
@@ -1990,6 +2190,7 @@ def _watch_loop(
     max_renewals: int = DEFAULT_MAX_RENEWALS,
     recovery_safe: bool = False,
     attempt_index: int = 1,
+    diagnostic_session_db: Path | None = None,
 ) -> int:
     """双监视：产物落盘 + 进程存活（start.marker exit 行）。
 
@@ -2173,6 +2374,9 @@ def _watch_loop(
             if exit_code is not None:
                 elapsed = (now - start_times[i]) / 60
                 log_text = log_file.read_text(encoding="utf-8", errors="replace")[:500] if log_file.is_file() else ""
+                stderr_file = wd / "stderr.log"
+                if stderr_file.is_file():
+                    log_text = stderr_file.read_text(encoding="utf-8-sig", errors="replace")[:500] + "\n" + log_text
 
                 # DB 锁是确定性失败证据。watcher 禁止自行发起第二次模型调用；
                 # 新尝试必须由上层重新 reserve/settle 后显式派发。
@@ -2228,7 +2432,7 @@ def _watch_loop(
             stall_threshold = min(8, timeout_min / 2)
             stalled_min = (now - start_times[i]) / 60
             if log_size == 0 and stalled_min >= stall_threshold and i not in warned_stall:
-                print(f"[ocsr] ⚠️ {p['label']} 日志 0 字节已 {stalled_min:.0f}min（疑似静默停滞）")
+                print(f"[ocsr] ⚠️ {p['label']} stdout JSONL 0 字节已 {stalled_min:.0f}min（stderr 另见 stderr.log；阶段不可见，根因未判定）")
                 warned_stall.add(i)
 
         # 看门狗：检查期限先落 inspection_due 快照，再有限续期/报告/终止。
@@ -2242,6 +2446,8 @@ def _watch_loop(
             elapsed = (now - start_times[i]) / 60
             log_size = (wd / "run.log").stat().st_size if wd and (wd / "run.log").is_file() else 0
             snapshot = _capture_worker_snapshot(p, now, snapshot_before)
+            diagnostic = _worker_diagnostics(wd, now, diagnostic_session_db)
+            snapshot["diagnostic"] = diagnostic
             state = {
                 "state": "inspection_due", "label": p["label"],
                 "inspection_deadline": deadlines[i],
@@ -2264,6 +2470,7 @@ def _watch_loop(
                 "latest_json_event_timestamp": snapshot["latest_json_event_timestamp"],
                 "tool_status": snapshot["tool_status"],
                 "subagent_status": snapshot["subagent_status"],
+                "diagnostic": diagnostic,
                 "inspection_baseline": state["inspection_baseline"],
             })
             has_progress = _has_auditable_progress(previous_snapshots[i], snapshot)
@@ -2338,6 +2545,11 @@ def _watch_loop(
                       f"继续跟踪至总期限")
                 continue
             if timeout_policy == TIMEOUT_POLICY_LEAF_KILL:
+                diagnostic.update({
+                    "termination_cause": "deadline_policy",
+                    "deadline_basis": ("total_deadline" if now >= total_deadlines[i]
+                                       else "inspection_deadline"),
+                })
                 state["state"] = "terminating"
                 _write_worker_state(wd, state)
                 killed_ok = _kill_worker(p["label"], wd) if wd else False
@@ -2382,6 +2594,19 @@ def _watch_loop(
                     "state": "timed_out", "old_process_stop_verified": False,
                     "resume_eligible": False, "handoff_required": True,
                 })
+                diagnostic.update({"termination_cause": "handoff_required",
+                                   "deadline_basis": "total_deadline"})
+            diagnostic_path = wd / "diagnostic.json"
+            diagnostic["worker_state"] = state["state"]
+            diagnostic_written = False
+            try:
+                _write_utf8(diagnostic_path, json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n")
+                diagnostic_written = True
+            except (OSError, TypeError, ValueError) as exc:
+                # Diagnostic I/O cannot prevent the stop/hand-off decision.
+                print(f"[ocsr] ⚠️ diagnostic write failed: {type(exc).__name__}", file=sys.stderr)
+            state["diagnostic"] = diagnostic
+            state["diagnostic_written"] = diagnostic_written
             _write_worker_state(wd, state)
             _append_telemetry(p["model"], _normalize_role(role), "detached", "stall",
                               round(elapsed, 1), log_size,
@@ -2403,6 +2628,9 @@ def _watch_loop(
                               **_resume_row_fields(p))
             _append_dispatch_ledger(ledger, {
                 "event": event_result, "reason": fail_reason, "label": p["label"],
+                **({"diagnostic_file": str(diagnostic_path)} if diagnostic_written else {}),
+                "diagnostic_written": diagnostic_written,
+                "diagnostic": diagnostic,
                 "model": p["model"], "wall_min": round(elapsed, 1),
                 "timeout_min": timeout_min, "log_bytes": log_size,
                 "timeout_policy_requested": timeout_policy_requested,
@@ -2417,6 +2645,15 @@ def _watch_loop(
                 **_resume_row_fields(p),
             })
             print(progress_text)
+            diagnostic_location = (str(diagnostic_path) if diagnostic_written
+                                   else "诊断文件未写入（摘要见 worker-state/ledger）")
+            print(f"[ocsr] 诊断：{diagnostic['termination_cause']}，"
+                  f"最后可见阶段={diagnostic['last_phase']} ({diagnostic['phase_source']})，"
+                  f"距CLI末事件={diagnostic['event_age_seconds']}s，"
+                  f"日志={diagnostic['log']['status']}，JSON坏行={diagnostic['log']['json_errors']}，"
+                  f"非法UTF8行={diagnostic['log']['invalid_utf8_lines']}，"
+                  f"非事件行={diagnostic['log']['non_json_lines']}，"
+                  f"尾行未完成={diagnostic['log']['partial_line']}，根因=unknown；{diagnostic_location}")
             timed_out.add(i)
 
         # 结案判定：三个集合之和覆盖全部 worker 即收口
@@ -3161,6 +3398,9 @@ def cmd_preflight(args) -> int:
         log_file = wd / "run.log"
         if log_file.is_file():
             log_text = log_file.read_text(encoding="utf-8", errors="replace")[:500]
+        stderr_file = wd / "stderr.log"
+        if stderr_file.is_file():
+            log_text = stderr_file.read_text(encoding="utf-8-sig", errors="replace")[:500] + "\n" + log_text
         if exit_code is None:
             status = "timeout"
         elif exit_code == 0:
@@ -3235,6 +3475,7 @@ def main():
                              f"{TIMEOUT_POLICY_HIERARCHICAL_REPORT}=报告/alive 保留进程供 commander 裁决")
     p_disp.add_argument("--progress", action="store_true", help="输出细粒度过程信息（已就绪/错峰/恢复交回等；启动、落盘、失败、超时等关键生命周期行默认输出）")
     p_disp.add_argument("--work-dir", help="临时工作目录 (默认 $TEMP)")
+    p_disp.add_argument("--diagnostic-session-db", help="显式只读查询 OpenCode v2 会话元数据；仅诊断，不参与续期/恢复裁决")
     p_disp.add_argument("--harness", default="cli",
                         help="派发 harness 标识 (遥测归因用，默认 cli)")
     p_disp.add_argument("--ledger-dir",
@@ -3296,6 +3537,11 @@ def main():
     p_run.add_argument("--answer", action="append", metavar="STEP=OPTION",
                        help="回答 pause 步骤（可多次）。退出码 10 表示等待裁决")
 
+    # diagnose: no model invocation and no writes, including historic evidence.
+    p_diag = sub.add_parser("diagnose", help="只读诊断 worker 日志和可选原生会话元数据（JSON）")
+    p_diag.add_argument("--worker-dir", required=True)
+    p_diag.add_argument("--session-db", help="显式 OpenCode v2 SQLite 路径；不猜测数据库位置或最新会话")
+
     # preflight
     p_pre = sub.add_parser("preflight", help="批量探测模型通道可用性")
     p_pre.add_argument("--model", action="append", required=True,
@@ -3323,6 +3569,8 @@ def main():
         return cmd_run(args)
     elif args.command == "preflight":
         return cmd_preflight(args)
+    elif args.command == "diagnose":
+        return cmd_diagnose(args)
     else:
         parser.print_help()
         return 1
