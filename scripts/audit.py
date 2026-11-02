@@ -2,7 +2,7 @@
 
 Checks that init-agent-docs initialized files have not rotted:
 dead links, STRUCTURE index completeness, tech-stack drift between docs
-and manifests, birth-record presence, AGENTS.md line budget, sync health.
+and manifests, birth-record presence, AGENTS.md line budget.
 
 All subcommands are read-only — this tool never modifies files.
 """
@@ -506,8 +506,6 @@ _STATUS_GLYPHS: dict[str, str] = {
     "undocumented":"UNDOC",
     "warn":        "WARN",
     "found":       "FOUND",
-    "broken":      "BROKEN",
-    "error":       "ERROR",
     "skip":        "SKIP",
     "empty":       "EMPTY",
     "unlinked":    "UNLINK",

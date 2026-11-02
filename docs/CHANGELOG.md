@@ -8,6 +8,7 @@
 - AGENTS.md 成为唯一 Agent 入口；删除派生副本 CLAUDE.md、GEMINI.md 与同步脚本 scripts/agent_links.py。
 - .githooks/pre-commit 移除三文件一致性检查（含内联 MD5 fallback），保留 python 检测、记忆结构检查与 OCSR 回归检查；治理变更提醒的匹配模式同步收窄。
 - scripts/audit.py 移除 _check_sync 及其输出分支；README、SKILL.md、docs/deployment.md、docs/audit-checklist.md、refs/dsh-integration.md 的验证清单同步去除 agent_links 项。
+- 3 位跨 family fresh reviewer（deepseek/deepseek-flash、xiaomi/mimo-v2.6-pro、zhipuai-coding-plan/glm-5.3-flash）独立复查一致判 REVISE：audit.py docstring 的 sync health 残留、_STATUS_GLYPHS 死标签、CURRENT.md 悬空指针，均已在本次变更内修复；报告存 .review/retire-agent-links-20261102/（gitignored）。
 - 407 passed；verify_ocsr_skill 13/13、audit、pre-commit 冒烟、diff/eol 检查通过。
 
 #### 迁移影响
