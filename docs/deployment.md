@@ -39,7 +39,6 @@ CLI 的工具状态与快照共用同一提取规则。步骤边界不会清除�
 ## 文档体系检查
 
 ```powershell
-python scripts/agent_links.py check
 python scripts/audit.py check
 git diff --check
 git ls-files --eol | Select-String "w/crlf"
@@ -47,4 +46,4 @@ git ls-files --eol | Select-String "w/crlf"
 
 ## Git hook
 
-仓库使用 `.githooks/pre-commit` 检查三份 agent 入口一致性和 OCSR 回归脚本。`core.hooksPath` 应指向 `.githooks`。
+仓库使用 `.githooks/pre-commit` 检查 OCSR 回归脚本并在检测到治理文档变更时输出独立复查提醒。`core.hooksPath` 应指向 `.githooks`。

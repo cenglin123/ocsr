@@ -91,7 +91,6 @@ worker 正常完成后按验收清单返工时，可用 `dispatch --resume-from 
 
 ```powershell
 python scripts/verify_ocsr_skill.py
-python scripts/agent_links.py check
 python scripts/audit.py check
 pytest tests/ -q
 ```

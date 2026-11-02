@@ -46,7 +46,6 @@ Python 解释器由 `OCSR_PYTHON` 环境变量指定（默认 `python`）。
 ## 验证
 
 - `python scripts/verify_ocsr_skill.py`
-- `python scripts/agent_links.py check`（协议：先在 `AGENTS.md` 改动后运行 `repair` 同步 `CLAUDE.md`/`GEMINI.md`）
 - `python scripts/audit.py check`
 - `pytest tests/ -q`（基线以 `docs/CURRENT.md` 最近一次复验记录为准；测试自带合成配置，不依赖本机 `config/allowed-models.json`）
 - `git diff --check`

@@ -24,9 +24,9 @@ OCSR（OpenCode Subagents Run）是以 headless `opencode run` 驱动异构、�
 
 ## 修改与验证
 
-- 只编辑 `AGENTS.md`；随后运行 `python scripts/agent_links.py repair` 同步 `CLAUDE.md` 和 `GEMINI.md`。
+- `AGENTS.md` 是唯一 Agent 入口；不创建 `CLAUDE.md` / `GEMINI.md` 等按宿主命名的同步副本。
 - 修改 OCSR 行为规则后运行：`python scripts/verify_ocsr_skill.py`。
-- 修改文档体系后运行：`python scripts/agent_links.py check` 与 `python scripts/audit.py check`。
+- 修改文档体系后运行：`python scripts/audit.py check`。
 - 治理规则变更需要独立视角复查；新增、删除或重定义准则段时，按 converge 的治理文档规则选择审查强度。
 - 提交前检查 `git diff --check` 和 `git ls-files --eol | Select-String "w/crlf"`。
 
