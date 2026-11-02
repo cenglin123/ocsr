@@ -29,7 +29,6 @@ python scripts/verify_ocsr_skill.py
 
 ```powershell
 python scripts/verify_ocsr_skill.py
-python scripts/agent_links.py check
 python scripts/audit.py check
 ```
 

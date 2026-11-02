@@ -2,7 +2,6 @@
 
 ## 机械检查
 
-- [ ] `python scripts/agent_links.py check` 通过。
 - [ ] `python scripts/audit.py check` 通过。
 - [ ] `python scripts/verify_ocsr_skill.py` 通过。
 - [ ] `git diff --check` 无空白错误。

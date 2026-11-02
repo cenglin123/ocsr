@@ -2,7 +2,7 @@
 
 Checks that init-agent-docs initialized files have not rotted:
 dead links, STRUCTURE index completeness, tech-stack drift between docs
-and manifests, birth-record presence, AGENTS.md line budget, sync health.
+and manifests, birth-record presence, AGENTS.md line budget.
 
 All subcommands are read-only — this tool never modifies files.
 """
@@ -13,7 +13,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -397,24 +396,6 @@ def _check_line_budget() -> list[dict[str, Any]]:
     return [{"kind": "line_budget", "status": status, "lines": line_count, "words": word_count}]
 
 
-def _check_sync() -> list[dict[str, Any]]:
-    script = ROOT / "scripts" / "agent_links.py"
-    if not script.is_file():
-        return [{"kind": "sync", "status": "skip", "detail": "agent_links.py not found"}]
-    try:
-        result = subprocess.run(
-            [sys.executable, str(script), "check"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return [{"kind": "sync", "status": "error", "detail": str(exc)}]
-    status = "ok" if result.returncode == 0 else "broken"
-    return [{"kind": "sync", "status": status, "detail": result.stdout.strip() or result.stderr.strip()}]
-
-
 # ---------------------------------------------------------------------------
 # memory
 # ---------------------------------------------------------------------------
@@ -508,7 +489,6 @@ def _run_all() -> list[dict[str, Any]]:
     results.extend(_drift_check())
     results.extend(_check_birth_record())
     results.extend(_check_line_budget())
-    results.extend(_check_sync())
     results.extend(_check_memory())
     return results
 
@@ -526,8 +506,6 @@ _STATUS_GLYPHS: dict[str, str] = {
     "undocumented":"UNDOC",
     "warn":        "WARN",
     "found":       "FOUND",
-    "broken":      "BROKEN",
-    "error":       "ERROR",
     "skip":        "SKIP",
     "empty":       "EMPTY",
     "unlinked":    "UNLINK",
@@ -573,13 +551,6 @@ def _format_text(results: list[dict[str, Any]], verbose: bool = False) -> str:
                 lines_out.append(
                     f"[OK    ] AGENTS.md: {r['lines']} lines / {r['words']} words (limit 200/400)"
                 )
-        elif kind == "sync":
-            if r["status"] == "broken":
-                lines_out.append(f"[BROKEN ] AGENTS.md/CLAUDE.md/GEMINI.md out of sync")
-            elif r["status"] == "error":
-                lines_out.append(f"[ERROR  ] sync check failed: {r['detail']}")
-            elif r["status"] == "skip":
-                lines_out.append("[SKIP   ] sync check (agent_links.py unavailable)")
         elif kind == "memory":
             if r["status"] == "skip":
                 lines_out.append("[SKIP   ] memory (no .agent/memory/ directory)")
