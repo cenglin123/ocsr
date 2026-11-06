@@ -19,4 +19,4 @@
 
 `.converge/` 是流程证据区（本地运行产物，gitignored 不入库），不是日常文档入口。
 
-> dsh 适配层（`package.json`、`cordis.patch.yml`、`lib/index.js`）只做映射/包装，不得复制 OCSR 核心语义或技能正文；入口见 [../refs/dsh-integration.md](../refs/dsh-integration.md)。
+> dsh 适配层（`package.json`、`cordis.patch.yml`、`lib/*.js`）只做映射/包装，不得复制 OCSR 核心语义或技能正文；入口见 [../refs/dsh-integration.md](../refs/dsh-integration.md)。

@@ -4,6 +4,7 @@
 
 - [ ] `python scripts/audit.py check` 通过。
 - [ ] `python scripts/verify_ocsr_skill.py` 通过。
+- [ ] `node --test tests/adapter/*.test.mjs` 通过（本机缺 dsh 0.2.2 运行时或 Node 时，pytest 桥 skip 不算失败）。
 - [ ] `git diff --check` 无空白错误。
 - [ ] 受 Git 管理的文本文件没有意外 CRLF。
 - [ ] `docs/STRUCTURE.md` 覆盖所有长期文档入口且链接有效。
