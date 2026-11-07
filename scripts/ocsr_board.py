@@ -4,7 +4,9 @@
 - 活跃/近期 worker：扫描 <temp>/ocsr_dispatch_*/<label>/ 下的
   worker-state.json / session-binding.json / start.marker / launcher.ps1
 - 历史：~/.ocsr/dispatch-log.jsonl 尾部
-面板自身唯一可写文件是 ~/.ocsr/board-groups.json（手动分组配置）。
+- 扫描根 = 默认 TEMP + CLI --work-dir + 面板「扫描目录」里在线增删的自定义根
+面板自身唯一可写文件是 ~/.ocsr/board-groups.json（手动分组 assignments 与
+自定义扫描根 roots）。
 
 端口策略：默认 8787；被旧 ocsr_board 占用时 KILL 旧实例后复用同端口
 （等同重启）；被其他程序占用时依次向后探测 8788..8797。
@@ -13,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -20,6 +23,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import webbrowser
@@ -94,7 +98,8 @@ def _read_exit_code(marker: Path) -> int | None:
     return None
 
 
-def scan_worker_dir(wd: Path, dispatch_name: str, started: datetime | None) -> dict[str, Any]:
+def scan_worker_dir(wd: Path, dispatch_name: str, started: datetime | None,
+                    root: Path | None = None) -> dict[str, Any]:
     state = _load_json(wd / "worker-state.json")
     binding = _load_json(wd / "session-binding.json")
     raw_state = state.get("state") or "launched"
@@ -140,8 +145,10 @@ def scan_worker_dir(wd: Path, dispatch_name: str, started: datetime | None) -> d
         elif badge == "stale" and last_activity is not None:
             duration_min = round((last_activity - started_at).total_seconds() / 60, 1)
 
+    # key 含扫描根短哈希：不同根下同名 dispatch/label 不共享隐藏/分组状态
+    root_tag = hashlib.sha1(str(root.resolve()).encode("utf-8")).hexdigest()[:8] if root else ""
     return {
-        "key": f"{dispatch_name}/{wd.name}",
+        "key": f"{root_tag}/{dispatch_name}/{wd.name}" if root_tag else f"{dispatch_name}/{wd.name}",
         "label": state.get("label") or wd.name,
         "dir": str(wd),
         "state": raw_state,
@@ -185,7 +192,7 @@ def scan_workers(temp_root: Path, days: int = 7) -> list[dict[str, Any]]:
             continue
         for wd in labels:
             if wd.is_dir():
-                workers.append(scan_worker_dir(wd, entry.name, started))
+                workers.append(scan_worker_dir(wd, entry.name, started, root=entry.parent))
     return workers
 
 
@@ -292,15 +299,20 @@ def _write_config(config: dict[str, Any], path: Path) -> None:
     os.replace(tmp, path)
 
 
+# ThreadingHTTPServer 下两个写端点共用此锁，保护配置的读-改-写与固定 tmp 文件名
+_CONFIG_LOCK = threading.Lock()
+
+
 def save_assignment(key: str, group: str, path: Path = GROUPS_PATH) -> dict[str, str]:
-    config = load_config(path)
-    assignments = config["assignments"]
-    if group:
-        assignments[key] = group
-    else:
-        assignments.pop(key, None)
-    _write_config(config, path)
-    return assignments
+    with _CONFIG_LOCK:
+        config = load_config(path)
+        assignments = config["assignments"]
+        if group:
+            assignments[key] = group
+        else:
+            assignments.pop(key, None)
+        _write_config(config, path)
+        return assignments
 
 
 def effective_roots(base: Path, path: Path = GROUPS_PATH,
@@ -328,25 +340,26 @@ def mutate_roots(action: str, raw_path: Any, base: Path,
     if any(ord(c) < 32 for c in raw_path) or len(raw_path) > 512:
         return [], "路径含控制字符或超长"
     p = Path(raw_path.strip())
-    config = load_config(path)
-    roots = config["roots"]
-    if action == "add":
-        if not p.is_absolute() or not p.is_dir():
-            return [], "必须是存在的绝对路径目录"
-        resolved = str(p.resolve())
-        if resolved == str(base.resolve()):
-            return [], "该目录已是默认扫描根"
-        if resolved in roots:
-            return [], "该目录已在列表中"
-        roots.append(resolved)
-    elif action == "remove":
-        if raw_path.strip() not in roots:
-            return [], "只能移除额外添加的扫描根"
-        roots.remove(raw_path.strip())
-    else:
-        return [], "未知 action"
-    _write_config(config, path)
-    return roots, ""
+    with _CONFIG_LOCK:
+        config = load_config(path)
+        roots = config["roots"]
+        if action == "add":
+            if not p.is_absolute() or not p.is_dir():
+                return [], "必须是存在的绝对路径目录"
+            resolved = str(p.resolve())
+            if resolved == str(base.resolve()):
+                return [], "该目录已是默认扫描根"
+            if resolved in roots:
+                return [], "该目录已在列表中"
+            roots.append(resolved)
+        elif action == "remove":
+            if raw_path.strip() not in roots:
+                return [], "只能移除额外添加的扫描根"
+            roots.remove(raw_path.strip())
+        else:
+            return [], "未知 action"
+        _write_config(config, path)
+        return roots, ""
 
 
 def default_group(worker: dict[str, Any]) -> str:
@@ -504,8 +517,9 @@ class BoardHandler(BaseHTTPRequestHandler):
                         "port": self.server.server_address[1],
                         "started_at": self.started_at})
         elif path == "/api/state":
+            cfg = load_config(self.groups_path)
+            custom = cfg["roots"]
             roots = effective_roots(self.base_root, self.groups_path, self.cli_roots)
-            custom = load_config(self.groups_path)["roots"]
             workers: list[dict[str, Any]] = []
             for root in roots:
                 workers.extend(scan_workers(root, self.days))
@@ -515,10 +529,12 @@ class BoardHandler(BaseHTTPRequestHandler):
             self._json({
                 "workers": workers,
                 "history": history,
-                "assignments": load_assignments(self.groups_path),
+                "assignments": cfg["assignments"],
                 "roots": [{"path": str(r), "kind": "default" if r == self.base_root
                            else ("cli" if r in self.cli_roots else "custom")}
                           for r in roots],
+                # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
+                "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
                 "generated_at": datetime.now().astimezone().isoformat(),
                 "dir_count": len(dir_labels),
             })
@@ -532,6 +548,12 @@ class BoardHandler(BaseHTTPRequestHandler):
         else:
             self._json({"error": "not found"}, 404)
 
+    def _read_json_body(self) -> Any:
+        length = int(self.headers.get("Content-Length") or 0)
+        if not 0 <= length <= 65536:
+            raise ValueError("bad content length")
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
     def do_POST(self) -> None:
         if not self._origin_ok():
             return
@@ -540,10 +562,15 @@ class BoardHandler(BaseHTTPRequestHandler):
         if ctype != "application/json":
             self._json({"error": "unsupported content type"}, 415)
             return
+        try:
+            self._do_post()
+        except OSError as exc:
+            self._json({"error": f"config io error: {exc}"}, 500)
+
+    def _do_post(self) -> None:
         if self.path == "/api/roots":
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                data = json.loads(self.rfile.read(min(length, 65536)).decode("utf-8"))
+                data = self._read_json_body()
             except (ValueError, json.JSONDecodeError):
                 self._json({"error": "bad request"}, 400)
                 return
@@ -559,8 +586,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
             return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            data = json.loads(self.rfile.read(min(length, 65536)).decode("utf-8"))
+            data = self._read_json_body()
         except (ValueError, json.JSONDecodeError):
             self._json({"error": "bad request"}, 400)
             return
@@ -576,7 +602,7 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--days", type=int, default=7, help="扫描最近 N 天的派发目录；0=全部")
     ap.add_argument("--work-dir", action="append", default=None,
-                    help="派发工作根目录（dispatcher --work-dir 的对应位置；可重复，默认 $TEMP）")
+                    help="在默认 $TEMP 之外追加派发扫描根（可重复）；也可在面板「扫描目录」中在线增删并持久化")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 

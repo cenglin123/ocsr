@@ -147,7 +147,10 @@ function loadSet(name){
     if(Array.isArray(raw))return new Set(raw.filter(x=>typeof x==="string"));}catch(e){}
   return new Set();
 }
-function saveSet(name,set){localStorage.setItem(name,JSON.stringify([...set].slice(-500)));}
+function saveSet(name,set){
+  try{localStorage.setItem(name,JSON.stringify([...set].slice(-500)));}
+  catch(e){/* 存储禁用/配额满：内存态仍生效，下轮渲染不受影响 */}
+}
 let hidden=loadSet("ocsr-board-hidden");
 let hiddenGroups=loadSet("ocsr-board-hidden-groups");
 let collapsedGroups=loadSet("ocsr-board-collapsed");
@@ -174,20 +177,21 @@ function timeOk(iso){
   if(range==="all")return true;
   if(!iso)return false;
   const t=Date.parse(iso);if(isNaN(t))return false;
-  const now=Date.now();
-  if(range==="1h")return now-t<=3600e3;
+  const diff=Date.now()-t;
+  if(diff<-60e3)return false;  // 未来时间戳（容忍 1 分钟时钟偏差）不算窗口内
+  if(range==="1h")return diff<=3600e3;
   if(range==="today")return new Date(t).toDateString()===new Date().toDateString();
-  if(range==="3d")return now-t<=3*86400e3;
-  if(range==="7d")return now-t<=7*86400e3;
+  if(range==="3d")return diff<=3*86400e3;
+  if(range==="7d")return diff<=7*86400e3;
   return true;
 }
-function workerTime(w){return w.started_at||w.last_activity||"";}
+function workerTime(w){return w.last_activity||w.started_at||"";}  // 最近活动优先：启动早但仍活跃的 worker 不应被时间窗隐藏
 function groupOf(w){return DATA.assignments[w.key]||(w.cwd||"（未知工作目录）");}
 function filtered(){
   const st=$("f-status").value, mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
   return DATA.workers.filter(w=>{
-    if(hidden.has(w.key))return showHidden;
-    if(hiddenGroups.has(groupOf(w)))return showHidden;
+    // 「显示已隐藏」只跳过隐藏判定，状态/模型/时间/关键字筛选仍然生效
+    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
     if(st!=="all"&&w.badge!==st)return false;
     if(mo!=="all"&&w.model!==mo)return false;
     if(!timeOk(workerTime(w)))return false;
@@ -197,8 +201,18 @@ function filtered(){
   });
 }
 function renderChips(list){
+  // facet 口径：计数跟随模型/时间/关键字/隐藏规则（不含状态筛选本身），
+  // 与点 chip 后看到的数量一致
+  const mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
+  const base=DATA.workers.filter(w=>{
+    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
+    if(mo!=="all"&&w.model!==mo)return false;
+    if(!timeOk(workerTime(w)))return false;
+    if(q&&!(w.label+" "+w.session_id+" "+w.cwd+" "+w.key).toLowerCase().includes(q))return false;
+    return true;
+  });
   const c={active:0,landed:0,timeout:0,stopped:0,failed:0,stale:0};
-  for(const w of DATA.workers)c[w.badge]=(c[w.badge]||0)+1;
+  for(const w of base)c[w.badge]=(c[w.badge]||0)+1;
   const cur=$("f-status").value;
   const chip=(st,txt,num,color)=>
     `<span class="chip${cur===st?" on":""}" data-st="${st}" title="点击筛选；再点取消">${txt}<b${color?` style="color:${color}"`:""}>${num}</b></span>`;
@@ -238,7 +252,7 @@ function card(w){
   </div>`;
 }
 function groupSection(name,ws){
-  const collapsed=collapsedGroups.has(name)&&!focusGroup;
+  const collapsed=collapsedGroups.has(name);  // 聚焦态同样尊重折叠，按钮不做空操作
   const showAll=expandedGroups.has(name);
   const shown=showAll?ws:ws.slice(0,GROUP_LIMIT);
   const more=ws.length>GROUP_LIMIT
@@ -271,7 +285,8 @@ function render(){
       ||(b.started_at||"").localeCompare(a.started_at||""));
     html+=groupSection(name,ws);
   }
-  const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])].filter(g=>!groups.has(g));
+  const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])]
+    .filter(g=>!groups.has(g)&&(showHidden||!hiddenGroups.has(g)));  // 隐藏的空手动组同样不渲染
   for(const name of manual){
     if(focusGroup&&name!==focusGroup)continue;
     html+=groupSection(name,[]);
@@ -294,10 +309,15 @@ function render(){
   renderRoots();
 }
 function renderRoots(){
-  $("roots-list").innerHTML=(DATA.roots||[]).map(r=>
-    `<div class="rrow"><span class="kind">${r.kind==="default"?"默认":r.kind==="cli"?"CLI":"自定义"}</span>
-     <span class="p">${esc(r.path)}</span>
-     ${r.kind==="custom"?`<button data-rpath="${esc(r.path)}">移除</button>`:""}</div>`).join("");
+  const rows=(DATA.roots||[]).filter(r=>r.kind!=="custom").map(r=>
+    `<div class="rrow"><span class="kind">${r.kind==="default"?"默认":"CLI"}</span>
+     <span class="p">${esc(r.path)}</span></div>`);
+  // 自定义根按配置原样列出：失效目录也可见、可移除
+  for(const r of DATA.custom_roots||[]){
+    rows.push(`<div class="rrow"><span class="kind">${r.exists?"自定义":"已失效"}</span>
+     <span class="p">${esc(r.path)}</span><button data-rpath="${esc(r.path)}">移除</button></div>`);
+  }
+  $("roots-list").innerHTML=rows.join("");
 }
 async function load(){
   const seq=++reqSeq;

@@ -63,7 +63,12 @@ python scripts/ocsr_board.py            # 默认 127.0.0.1:8787，自动开浏�
 python scripts/ocsr_board.py --days 30  # 扩大派发目录扫描窗口（默认 7 天；0=全部）
 ```
 
-面板是纯只读观察者：扫描 `%TEMP%\ocsr_dispatch_*/<label>/`（worker-state、session-binding、start.marker）与 `~/.ocsr/dispatch-log.jsonl`，不改派发、看门狗或遥测链路；唯一可写文件是面板私有的 `~/.ocsr/board-groups.json`（手动分组）。支持按 cwd 默认分组、拖动手动分组、状态/模型/关键字筛选、session ID 与返工命令复制；隐藏记录仅作用于浏览器视图。运行状态以 watcher 落盘证据为准：越过 `total_deadline` 或进程已退出但未验收的条目显示为灰色「滞留」，不冒充进行中。
+面板是纯只读观察者：扫描派发目录下的 worker-state、session-binding、start.marker 与 `~/.ocsr/dispatch-log.jsonl`，不改派发、看门狗或遥测链路；唯一可写文件是面板私有的 `~/.ocsr/board-groups.json`（`assignments` 手动分组 + `roots` 自定义扫描根）。
+
+- **筛选**：顶部状态 chips 点击直筛（再点取消）；状态下拉、模型下拉、关键字、时间窗（近 1h/今天/近 3 天/近 7 天/全部，按最近活动时间判定）；chip 计数跟随其余筛选条件（facet 口径）。遥测历史同样受时间/模型/关键字筛选。
+- **分组**：默认按 cwd（session-binding.json 的工作目录）分组，卡片可拖到其他组标题完成手动分组并持久化；组支持折叠/展开、聚焦单组、整组隐藏（视图层，不删文件）、组内默认 6 张 + 显示全部/收起。折叠/隐藏/展开状态存浏览器 localStorage，手动分组存服务端配置。
+- **扫描根管理**：默认 TEMP 恒被扫描；`--work-dir` 是**追加**而非替换（可重复）；「⚙ 扫描目录」面板可在线增删自定义根（绝对路径、须存在；默认/CLI 根不可移除；失效目录以「已失效」列出且可移除）。扫描根、分组与显示状态互不影响 OCSR 证据。
+- **维护**：复制 session ID 与 `--resume-from` 返工命令（实际执行仍走 CLI）；单卡/整组隐藏仅作用于视图。运行状态以 watcher 落盘证据为准：越过 `total_deadline` 或进程已退出但未验收的条目显示为灰色「滞留」，不冒充进行中；遥测中的 error/timeout 会把徽章校正为失败/超时。
 
 端口：8787 被旧面板实例占用时自动 KILL 旧实例后同端口重启（经 `/api/identity` 识别）；被其他程序占用时依次探测 8788..8797。Windows 上禁用 `SO_REUSEADDR`（它会允许强行绑定已占用端口，使占用探测失效）。
 
