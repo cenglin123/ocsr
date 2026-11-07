@@ -1434,7 +1434,7 @@ class TestModelAllowlist:
         with mock.patch.object(mod, "_check_model_calls_disabled"):
             yield
 
-    # ALLOWED_MODELS 由用户本地的 config/allowed-models.json 加载（不入库，
+    # ALLOWED_MODELS 由用户本地的 ~/.ocsr/allowed-models.json 加载（不入库，
     # 未配置合法）。测试一律用合成白名单或临时配置注入，不依赖用户真实配置。
     SYNTHETIC = {"vendor/model-a", "vendor/model-b"}
     DISALLOWED = [

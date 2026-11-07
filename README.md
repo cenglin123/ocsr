@@ -8,7 +8,7 @@ OCSR（OpenCode Subagents Run）把 headless `opencode run` 用作独立于宿�
 
 ```powershell
 opencode models
-# <qualified-id> 必须存在于 config/allowed-models.json
+# <qualified-id> 必须存在于 ~/.ocsr/allowed-models.json（可用 OCSR_HOME 覆盖）
 opencode run "请完成一个自包含任务" -m <qualified-id>
 python scripts/verify_ocsr_skill.py
 ```
@@ -30,6 +30,7 @@ python scripts/verify_ocsr_skill.py
 ```powershell
 python scripts/verify_ocsr_skill.py
 python scripts/audit.py check
+node --test tests/adapter/*.test.mjs   # dsh 适配层契约回归（需本机 dsh >= 0.2 运行时）
 ```
 
 本仓库的核心产物是 skill 文档和机械验证脚本，不提供安全沙箱、常驻服务或通用运行时 wrapper。

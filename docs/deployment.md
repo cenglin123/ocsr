@@ -6,6 +6,7 @@ OCSR 没有服务部署。这里的“运行”指在本机调用 OpenCode CLI�
 
 - Windows PowerShell；命令需兼容 Windows PowerShell 5.1。
 - Python 3；现有验证脚本仅使用标准库。
+- Node.js 24.9+（仅 dsh 适配层回归需要，随 dsh 0.2.2-rc.1 提供；`engines.node` 要求来自 dsh 包）。
 - OpenCode CLI 及至少一个已配置、可用的模型 provider。
 
 Windows launcher 通过 PowerShell `Add-Type` 加载内嵌的 Win32 Job helper，运行账号必须允许该操作与 Job 绑定；受限宿主或不兼容的外层 Job 导致失败时会在调用 OpenCode 前退出。Job 属于 launcher，不属于 dispatcher；不新增常驻服务或安装任务。实现见 `scripts/ocsr_launcher_job.cs`，生命周期边界见 [pitfalls.md](pitfalls.md)「opencode 常驻后台服务」。
@@ -43,6 +44,17 @@ python scripts/audit.py check
 git diff --check
 git ls-files --eol | Select-String "w/crlf"
 ```
+
+## dsh 适配层回归
+
+```powershell
+node --test tests/adapter/*.test.mjs
+python -m pytest tests/test_dsh_adapter.py -q
+```
+
+`tests/adapter/*.test.mjs` 用 Node 内置 `node:test`，针对本机真实的 dsh 0.2.2-rc.1 运行时做 11 项契约回归（安装版本门、真实 SkillRegistry 的 skill provider、bundle patch entry 与 package exports 对齐、tool 定义与输出 schema、Config 只收窄语义、后台 job 输出环与状态映射、`job_kill` 的 killed 映射、jobs 缺失时的 code 5）。它需要本机存在 0.2.2-rc.1 的 dsh 运行时，默认自动探测（npm 全局 `@deepseek-ai/dsh/node_modules` > `~/.dsh/profiles/node_modules` > 常见全局路径）；设置 `DSH_RUNTIME_ROOT` 会固定运行时并关闭自动探测（值不可用即整组 skip）。需要把 skip 变成失败（CI）时设 `OCSR_REQUIRE_ADAPTER_TESTS=1`。Node 25 不接受目录参数，须传文件或 glob（等价 `npm run test:adapter`）。
+
+`python -m pytest tests/ -q` 已包含 pytest 桥 `tests/test_dsh_adapter.py`：它枚举 `tests/adapter/*.test.mjs` 并逐个传给 node；本机找不到 0.2.2 运行时或 Node 时整组 skip，不视为失败（设 `OCSR_REQUIRE_ADAPTER_TESTS=1` 则改为失败）。适配契约见 [../refs/dsh-integration.md](../refs/dsh-integration.md)。
 
 ## Git hook
 

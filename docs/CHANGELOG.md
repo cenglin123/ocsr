@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## 2026-11-07
+
+### dsh 适配层迁移到 0.2.2-rc.1
+
+#### 变更内容
+- 适配目标从 dsh `0.1.1-rc.2` 升到 `0.2.2-rc.1`：包版本 `0.2.0`（`@ocsr/dsh-ocsr`），`engines.dsh ^0.2.2-rc.1`；peerDependencies 收敛为 `@deepseek-ai/cordis ^4.1.0`、`@deepseek-ai/dsh-skill ^0.2.2-rc.1`、`@deepseek-ai/dsh-tools ^0.2.2-rc.1`、`@deepseek-ai/schemastery ^3.19.0`，旧 jobs/jobs-local/tool-jobs/settings/session/session-projection peer 全部移除；dependencies 保留 `yaml ^2.8.1`；exports 收敛为 `.` 与 `./tool`。
+- `cordis.patch.yml` 只剩 `ocsr-skill` 与 `ocsr-tools` 两个 entry（`ocsr-settings`、`ocsr-projection` 删除）。
+- 模型只收窄门从 settings namespace 改为工具自身 Config：`lib/tool-ocsr.js` 新增 `Config = z.object({ allowedModels: z.array(z.string()).default(undefined) })`，由 `apply(ctx, config)` 读取；新增 `lib/model-gate.js`，按 `OCSR_ALLOWED_MODELS_PATH` > `OCSR_HOME/allowed-models.json` > `~/.ocsr/allowed-models.json` 与 driver 同优先级取基础名单并 fail-closed。语义：省略=完全交给 driver、显式空数组=全关、非空=取交集（只收窄、不放宽）。`.default(undefined)` 是承重的，否则 schemastery 会把省略字段补成 `[]`，让未配置的 profile 静默全关。
+- `background:true` 按 0.2.2 jobs 契约重写：`run(job)` 内用 `job.append(...)` 写 registry 输出环（stderr 走 `channel:'stderr'`），返回 `{cancel, done}`，`done` 解析 `{status:'completed'|'killed'|'failed', detail?}`；owner 取 `exec.agent?.id`（SessionId），无 agent 时省略即 unowned。旧 `{cancel, done, readOutput}` 形态替换为 registry 输出环。
+- 移除 settings namespace 与 `ocsr.jobs` session 投影两个平面：0.2.2 的 settings 服务改为 SettingsForms，不再有 register/get；projection 契约要求 zod `ZodType`（schemastery 无 `.parse`）且基础 bundle 默认挂载 `session-projection-cache`，OCSR 的内存投影按设计会自禁用。删除 `lib/settings-ocsr.js`、`lib/projection-ocsr.js`。
+- 新增适配层回归：`tests/adapter/*.test.mjs`（Node 内置 `node:test`，11 项契约回归，对真实 dsh 0.2.2 运行时验安装版本门、真实 SkillRegistry 的 skill provider、bundle patch entry 与 package exports 对齐、tool 定义与输出 schema、Config 窄门语义、后台输出环与状态映射、`job_kill` 的 killed 映射、jobs 缺失时的 code 5）与 pytest 桥 `tests/test_dsh_adapter.py`（枚举测试文件逐个传给 node；缺 0.2.2 运行时或 Node 时 skip，`OCSR_REQUIRE_ADAPTER_TESTS=1` 可把 skip 变成失败；运行时自动探测，`DSH_RUNTIME_ROOT` 可固定运行时并关闭自动探测）。`package.json` 新增 `scripts.test:adapter`，`files` 改为显式 glob（`lib/*.js`、`SKILL.md`、`scripts/*.py`、`scripts/*.ps1`、`scripts/*.cs`、`refs/*.md`、`cordis.patch.yml`），使 `npm pack` 不再打入 `scripts/__pycache__/*.pyc`。
+- 文档同步：`refs/dsh-integration.md`、`docs/CURRENT.md`、`docs/deployment.md` 按 0.2.2 契约重写/校正（preset 名单 `minimal/standard/ptc/cordis`、白名单唯一事实源、双 entry、已移除平面、验证命令）。
+- 408 passed（含适配层 pytest 桥）；`verify_ocsr_skill.py` 13/13、`audit.py check`、适配层 Node 套件 8/8 与 `git diff --check` 通过。
+
+#### 迁移影响
+- 已装旧版 profile 需重新 `dsh plugin --profile <p> add .`（或升级到 0.2.0）才能拿到双 entry 与 0.2.2 jobs 契约；宿主低于 `^0.2.2-rc.1` 时安装预检会拒绝、加载期 bundle 被 skip，不要用 `allow-version` 豁免绕过。
+- 旧 settings 里的 `dsh-ocsr` 白名单配置不再生效；需要收窄时给 `ocsr-tools` 的 `config.allowedModels` 配置（只能写 profile patch；非 volatile 字段不出现在设置表单）。省略该字段即完全由 driver 的 `~/.ocsr/allowed-models.json` 决定。
+- 白名单仍只在用户本地 `~/.ocsr/allowed-models.json` 维护，包内没有 `config/`，重装不会带出模型池。
+- 依赖 `ocsr.jobs` 投影的外部观察面消失；job 生命周期改从 jobs 服务自身读取，`job_output`/`job_kill` 不受影响。
+- 适配层回归需要本机 0.2.2 运行时；无可探测运行时或 Node 的机器上 pytest 桥会 skip，不算失败。
+
 ## 2026-11-02
 
 ### 退役 AGENTS/CLAUDE/GEMINI 三文件同步体系
