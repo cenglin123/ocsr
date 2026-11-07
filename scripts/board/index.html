@@ -141,6 +141,7 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
     <option value="list">列表视图</option>
   </select>
   <input id="new-group" placeholder="新分组名（回车）" size="14">
+  <button id="btn-refresh" title="强制重扫（绕过服务端缓存）">⟳ 刷新</button>
   <button id="btn-roots">⚙ 扫描目录</button>
   <button id="btn-archive-done" title="把当前筛选结果中所有已结束（非进行中）的卡片归档，可在「已归档」中恢复">归档已结束</button>
   <button id="btn-show-hidden" title="查看/恢复已归档的卡片与组">已归档 (0)</button>
@@ -204,7 +205,7 @@ function failReason(w){
   const od=w.outcome_detail||"";
   if(od.startsWith("error:exit_0_name_mismatch"))return "产物文件名与期望不符";
   if(od.startsWith("error:exit_0_no_artifact"))return "进程正常退出，但产物未落盘";
-  if(od.startsWith("error:exit_"))return od;
+  if(od.startsWith("error:exit_"))return `进程异常退出（${od.replace("error:exit_","exit=")}）`;
   if(w.badge==="failed"&&w.exit_code!=null&&w.exit_code!==0)return `进程异常退出（exit=${w.exit_code}）`;
   if(w.badge==="failed")return od||"失败（详见遥测）";
   return "";
@@ -223,10 +224,11 @@ function detailDl(w){
 }
 function sortWorkers(ws){
   const mode=$("sort-by").value, arr=ws.slice();
-  const byTime=(a,b)=>(a.started_at||"").localeCompare(b.started_at||"");
-  if(mode==="started_asc")arr.sort(byTime);
-  else if(mode==="status")arr.sort((a,b)=>(a.badge==="active"?0:1)-(b.badge==="active"?0:1)||byTime(b,a));
-  else arr.sort((a,b)=>byTime(b,a));  // started_desc 默认
+  // 无启动时间的记录始终排最后（正序用 "9999" 兜底）
+  if(mode==="started_asc")arr.sort((a,b)=>(a.started_at||"9999").localeCompare(b.started_at||"9999"));
+  else if(mode==="status")arr.sort((a,b)=>(a.badge==="active"?0:1)-(b.badge==="active"?0:1)
+    ||(b.started_at||"").localeCompare(a.started_at||""));  // 进行中优先，其余按启动时间倒序
+  else arr.sort((a,b)=>(b.started_at||"").localeCompare(a.started_at||""));  // started_desc 默认
   return arr;
 }
 function rowView(w){
@@ -239,12 +241,12 @@ function rowView(w){
     <td>${fmtDur(w)}</td>
     <td>${esc(w.session_id?w.session_id.slice(0,14)+"…":"—")}</td>
     <td><button data-act="sid">⧉</button> <button data-act="resume">返工</button>
-      <button data-act="detail">详情</button> <button data-act="hide">${archiveLabel(w.key)}</button></td>
-  </tr>`;
+      <button data-act="detail">详情</button> <button data-act="hide">${archiveLabel(w)}</button></td>
+  </tr>${detailKeys.has(w.key)?`<tr class="detail-row"><td colspan="7">${detailDl(w)}</td></tr>`:""}`;
 }
 function fmtDur(w){
   const m=w.badge==="active"?(w.duration_min??w.wall_min):(w.wall_min??w.duration_min);
-  if(m==null)return "—";
+  if(typeof m!=="number"||!isFinite(m))return "—";  // 遥测属外部输入，非数值不渲染
   return m>=60?`${Math.floor(m/60)}h${Math.round(m%60)}m`:`${m}m`;
 }
 function timeOk(iso){
@@ -302,7 +304,21 @@ function renderChips(list){
     chip("stale","◌ 滞留",c.stale,"")+
     `<span class="chip static">显示 ${list.length} / ${DATA.workers.length}</span>`;
 }
-function archiveLabel(key){return hidden.has(key)?"恢复":"归档";}
+function isArchived(w){return hidden.has(w.key)||hiddenGroups.has(groupOf(w));}
+function archiveLabel(w){return isArchived(w)?"恢复":"归档";}
+function unarchiveOne(w){
+  const g=groupOf(w);
+  if(hiddenGroups.has(g)){
+    // 组归档被单张恢复：拆成逐卡归档，避免整组被静默恢复
+    hiddenGroups.delete(g);
+    for(const x of DATA.workers)if(groupOf(x)===g&&x.key!==w.key)hidden.add(x.key);
+  }
+  hidden.delete(w.key);
+}
+function visibleWorkers(){  // 批量操作的作用域=当前可见范围（含聚焦约束）
+  const l=filtered();return focusGroup?l.filter(w=>groupOf(w)===focusGroup):l;
+}
+const detailKeys=new Set();  // 展开的详情（卡片 details 与列表 detail-row）跨轮询保持
 function card(w){
   const sid=w.session_id?`${esc(w.session_id.slice(0,14))}…`:"—";
   const dur=fmtDur(w);
@@ -316,9 +332,9 @@ function card(w){
     <div class="durbar"><i style="width:${durPct}%"></i></div>
     <div class="actions">
       <button data-act="resume">复制返工命令</button>
-      <button data-act="hide">${archiveLabel(w.key)}</button>
+      <button data-act="hide">${archiveLabel(w)}</button>
     </div>
-    <details><summary>详情</summary>${detailDl(w)}</details>
+    <details data-dt="${esc(w.key)}"${detailKeys.has(w.key)?" open":""}><summary>详情</summary>${detailDl(w)}</details>
   </div>`;
 }
 function groupSection(name,ws){
@@ -352,9 +368,13 @@ function render(){
   }
   let names=[...groups.keys()].sort((a,b)=>a.localeCompare(b));
   if(focusGroup)names=names.filter(n=>n===focusGroup);
+  // 归档视图：整组归档的 cwd 组即使卡片被筛掉也保留组标题（否则无法整组恢复）
+  if(showHidden)for(const g of hiddenGroups){
+    if(!names.includes(g)&&(!focusGroup||g===focusGroup))names.push(g);
+  }
   let html="";
   for(const name of names){
-    const ws=sortWorkers(groups.get(name));
+    const ws=sortWorkers(groups.get(name)||[]);  // 归档组可能无卡通过筛选，仍显示组标题供整组恢复
     html+=groupSection(name,ws);
   }
   const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])]
@@ -377,7 +397,8 @@ function render(){
       <td>${esc(r.wall_min??"—")}</td><td>${esc(r.artifact_bytes??"—")}</td><td>${esc(r.read_audit||"")}</td></tr>`;
   }).join("");
   $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 5s 轮询`;
-  $("btn-show-hidden").textContent=(showHidden?"返回主视图":"已归档")+` (${hidden.size+hiddenGroups.size})`;
+  $("btn-show-hidden").textContent=(showHidden?"返回主视图":"已归档")+
+    ` (${DATA.workers.filter(w=>hidden.has(w.key)||hiddenGroups.has(groupOf(w))).length})`;  // 当前扫描结果中的归档卡片数
   $("btn-archive-done").textContent=showHidden?"恢复当前筛选":"归档已结束";
   renderRoots();
 }
@@ -392,10 +413,10 @@ function renderRoots(){
   }
   $("roots-list").innerHTML=rows.join("");
 }
-async function load(){
+async function load(force){
   const seq=++reqSeq;
   try{
-    const resp=await fetch("/api/state");
+    const resp=await fetch("/api/state"+(force?"?fresh=1":""));
     const data=await resp.json();
     if(seq!==reqSeq)return;  // 只接受最新请求，防止旧响应覆盖刚保存的分组
     DATA=data;
@@ -444,18 +465,14 @@ document.addEventListener("click",async e=>{
   const w=DATA.workers.find(x=>x.key===key);
   if(!w)return;
   if(btn.dataset.act==="detail"){
-    const tr=btn.closest("tr[data-key]");
-    const next=tr.nextElementSibling;
-    if(next&&next.classList.contains("detail-row")){next.remove();return;}
-    const dr=document.createElement("tr");dr.className="detail-row";
-    dr.innerHTML=`<td colspan="7">${detailDl(w)}</td>`;
-    tr.after(dr);return;
+    detailKeys.has(key)?detailKeys.delete(key):detailKeys.add(key);
+    render();return;
   }
   if(btn.dataset.act==="sid")copyText(w.session_id);
   if(btn.dataset.act==="resume")copyText(`python scripts/ocsr_dispatch.py dispatch --resume-from "${w.dir}"`);
   if(btn.dataset.act==="hide"){
-    hidden.has(key)?hidden.delete(key):hidden.add(key);
-    saveSet("ocsr-board-hidden",hidden);
+    if(isArchived(w)){unarchiveOne(w);}else{hidden.add(w.key);}
+    saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);
     render();
   }
 });
@@ -511,25 +528,39 @@ $("btn-root-add").addEventListener("click",async()=>{
 $("btn-show-hidden").addEventListener("click",()=>{showHidden=!showHidden;render();});
 $("btn-archive-done").addEventListener("click",()=>{
   if(showHidden){
-    // 归档视图：批量恢复当前筛选下的卡片与所在组
-    const list=filtered();
+    // 归档视图：批量恢复当前可见范围（含聚焦约束）内的归档卡片
+    const list=visibleWorkers();
     if(!list.length){toast("当前筛选下没有已归档卡片");return;}
-    for(const w of list){hidden.delete(w.key);hiddenGroups.delete(groupOf(w));}
+    for(const w of list)unarchiveOne(w);  // 组归档拆逐卡，目标卡恢复，其余保持归档
     saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);
     render();toast(`已恢复 ${list.length} 张`);return;
   }
-  const done=filtered().filter(w=>w.badge!=="active"&&!hidden.has(w.key));
+  const done=visibleWorkers().filter(w=>w.badge!=="active"&&!isArchived(w));
   if(!done.length){toast("当前筛选下没有可归档的已结束卡片");return;}
   for(const w of done)hidden.add(w.key);
   saveSet("ocsr-board-hidden",hidden);
   render();toast(`已归档 ${done.length} 张，点「已归档」可查看或恢复`);
 });
+// 卡片 <details> 的展开状态跨轮询保持（toggle 不冒泡，用捕获）
+document.addEventListener("toggle",e=>{
+  if(e.target.tagName!=="DETAILS")return;
+  const host=e.target.closest("[data-key]");if(!host)return;
+  e.target.open?detailKeys.add(host.dataset.key):detailKeys.delete(host.dataset.key);
+},true);
 for(const id of["f-status","f-model","f-q","f-time"])$(id).addEventListener("input",render);
 $("sort-by").addEventListener("input",()=>{savePref("ocsr-board-sort",$("sort-by").value);render();});
 $("view-mode").addEventListener("input",()=>{savePref("ocsr-board-view",$("view-mode").value);render();});
 $("sort-by").value=loadPref("ocsr-board-sort","started_desc");
 $("view-mode").value=loadPref("ocsr-board-view","cards");
-load();setInterval(load,5000);
+$("btn-refresh").addEventListener("click",()=>load(true));
+// 自适应轮询：有进行中的 worker 时 5s，否则 15s；服务端另有 10s 扫描缓存
+let pollMs=5000;
+async function poll(){
+  await load();
+  pollMs=DATA.workers.some(w=>w.badge==="active")?5000:15000;
+  setTimeout(poll,pollMs);
+}
+poll();
 </script>
 </body>
 </html>
