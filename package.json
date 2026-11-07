@@ -1,6 +1,6 @@
 {
-  "name": "@ocsr/dsh-ocsr",
-  "version": "0.2.0",
+  "name": "dsh-ocsr",
+  "version": "0.2.1",
   "description": "An ocsr skill and an ocsr_dispatch tool that run headless opencode run as fresh-context, cross-vendor worker backends.",
   "keywords": [
     "dsh",
