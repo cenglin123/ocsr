@@ -14,13 +14,17 @@
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
   font:13px/1.55 ui-monospace,"Cascadia Code","Cascadia Mono",Consolas,"Courier New",monospace;}
-a{color:var(--accent);text-decoration:none}
 header{padding:14px 20px 10px;border-bottom:1px solid var(--border)}
 h1{font-size:15px;margin:0;letter-spacing:2px;font-weight:700}
 h1 .sub{color:var(--dim);font-weight:400;letter-spacing:0;font-size:12px;margin-left:10px}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.chip{border:1px solid var(--border);border-radius:4px;padding:1px 8px;font-size:12px;color:var(--dim);background:var(--panel)}
+.chip{border:1px solid var(--border);border-radius:4px;padding:1px 8px;font-size:12px;
+  color:var(--dim);background:var(--panel)}
 .chip b{font-weight:700;margin-left:4px}
+.chip[data-st]{cursor:pointer}
+.chip[data-st]:hover{border-color:var(--accent);color:var(--text)}
+.chip.on{border-color:var(--accent);background:#1a2033;color:var(--text)}
+.chip.static{cursor:default}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 20px;border-bottom:1px solid var(--border)}
 select,input{background:var(--panel);color:var(--text);border:1px solid var(--border);
   border-radius:4px;padding:4px 8px;font:inherit;font-size:12px}
@@ -31,16 +35,22 @@ button{background:var(--panel);color:var(--dim);border:1px solid var(--border);
 button:hover{color:var(--text);border-color:var(--accent)}
 .meta{color:var(--faint);font-size:11px;margin-left:auto}
 main{padding:14px 20px 40px}
-.group{margin-bottom:18px}
-.group-title{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px dashed transparent;
-  border-bottom:1px solid var(--border);color:var(--dim);font-size:12px;cursor:default}
+.focus-bar{display:flex;align-items:center;gap:8px;margin-bottom:10px;color:var(--accent);font-size:12px}
+.group{margin-bottom:14px}
+.group-title{display:flex;align-items:center;gap:6px;padding:6px 8px;border:1px dashed transparent;
+  border-bottom:1px solid var(--border);color:var(--dim);font-size:12px}
 .group-title .count{color:var(--faint)}
 .group-title.drop-hint{border:1px dashed var(--accent);color:var(--accent)}
-.group-title .gname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70vw}
+.group-title .gname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:55vw}
+.group-title .toggle{cursor:pointer;color:var(--faint);width:14px;text-align:center}
+.group-title .toggle:hover{color:var(--text)}
+.group-title .gops{margin-left:auto;display:flex;gap:4px}
+.group-title .gops button{padding:0 6px;font-size:11px;border-color:transparent}
+.group-title .gops button:hover{border-color:var(--accent)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;padding:10px 0 0}
+.group.collapsed .cards,.group.collapsed .more-row{display:none}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px 12px;cursor:grab}
 .card:active{cursor:grabbing}
-.card.hidden-card{display:none}
 .card .top{display:flex;align-items:center;gap:8px}
 .card .label{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card .kv{color:var(--dim);font-size:12px;margin-top:4px;word-break:break-all}
@@ -62,6 +72,9 @@ main{padding:14px 20px 40px}
 @keyframes pulse{50%{opacity:.45}}
 .durbar{height:3px;background:var(--border);border-radius:2px;margin-top:8px;overflow:hidden}
 .durbar i{display:block;height:100%;background:var(--accent);opacity:.7}
+.more-row{padding:6px 0 0}
+.more-row button{color:var(--faint);border-style:dashed;width:100%}
+.more-row button:hover{color:var(--accent)}
 h2{font-size:12px;color:var(--dim);letter-spacing:1px;margin:26px 0 8px;border-bottom:1px solid var(--border);padding-bottom:6px}
 table{border-collapse:collapse;width:100%;font-size:12px}
 th,td{text-align:left;padding:4px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
@@ -71,7 +84,15 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
 .empty{color:var(--faint);padding:20px 0}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel2);
   border:1px solid var(--accent);color:var(--text);padding:6px 14px;border-radius:4px;
-  font-size:12px;opacity:0;transition:opacity .2s;pointer-events:none}
+  font-size:12px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:70vw}
+#roots-panel{display:none;margin:10px 20px 0;padding:10px 12px;border:1px solid var(--border);
+  border-radius:6px;background:var(--panel);font-size:12px}
+#roots-panel.open{display:block}
+#roots-panel .rrow{display:flex;align-items:center;gap:8px;padding:3px 0;color:var(--dim)}
+#roots-panel .rrow .p{word-break:break-all}
+#roots-panel .kind{color:var(--faint);font-size:11px;white-space:nowrap}
+#roots-panel .radd{display:flex;gap:8px;margin-top:8px}
+#roots-panel .radd input{flex:1}
 </style>
 </head>
 <body>
@@ -90,14 +111,28 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
     <option value="stale">◌ 失联/滞留</option>
   </select>
   <select id="f-model"><option value="all">全部模型</option></select>
-  <input id="f-q" placeholder="筛选 label / session / 路径" size="26">
-  <input id="new-group" placeholder="新分组名" size="12">
+  <select id="f-time">
+    <option value="all">全部时间</option>
+    <option value="1h">近 1 小时</option>
+    <option value="today">今天</option>
+    <option value="3d">近 3 天</option>
+    <option value="7d">近 7 天</option>
+  </select>
+  <input id="f-q" placeholder="筛选 label / session / 路径" size="22">
+  <input id="new-group" placeholder="新分组名（回车）" size="14">
+  <button id="btn-roots">⚙ 扫描目录</button>
   <button id="btn-show-hidden">显示已隐藏 (0)</button>
   <span class="meta" id="meta"></span>
 </div>
+<div id="roots-panel">
+  <div style="color:var(--dim);margin-bottom:4px">扫描根目录（默认 TEMP + 自定义；对 dispatcher --work-dir 的目录同样有效）</div>
+  <div id="roots-list"></div>
+  <div class="radd"><input id="root-path" placeholder="绝对路径，如 D:\work\dispatches"><button id="btn-root-add">添加</button></div>
+</div>
 <main>
+  <div id="focus-slot"></div>
   <div id="groups"></div>
-  <h2>遥测历史（dispatch-log，最近 200 条）</h2>
+  <h2>遥测历史（dispatch-log，最近 200 条，受时间/模型/关键字筛选）</h2>
   <div style="max-height:300px;overflow:auto">
   <table><thead><tr><th>时间</th><th>label</th><th>模型</th><th>结果</th><th>时长(m)</th><th>产物</th><th>读审计</th></tr></thead>
   <tbody id="history"></tbody></table>
@@ -106,16 +141,27 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
 <div id="toast"></div>
 <script>
 "use strict";
-let DATA={workers:[],history:[],assignments:{},generated_at:""};
-let hidden=new Set();
-try{const raw=JSON.parse(localStorage.getItem("ocsr-board-hidden")||"[]");
-  if(Array.isArray(raw))hidden=new Set(raw.filter(x=>typeof x==="string"));}catch(e){}
-let showHidden=false, dragging=null, suspend=false, reqSeq=0;
+let DATA={workers:[],history:[],assignments:{},roots:[],generated_at:""};
+function loadSet(name){
+  try{const raw=JSON.parse(localStorage.getItem(name)||"[]");
+    if(Array.isArray(raw))return new Set(raw.filter(x=>typeof x==="string"));}catch(e){}
+  return new Set();
+}
+function saveSet(name,set){
+  try{localStorage.setItem(name,JSON.stringify([...set].slice(-500)));}
+  catch(e){/* 存储禁用/配额满：内存态仍生效，下轮渲染不受影响 */}
+}
+let hidden=loadSet("ocsr-board-hidden");
+let hiddenGroups=loadSet("ocsr-board-hidden-groups");
+let collapsedGroups=loadSet("ocsr-board-collapsed");
+let expandedGroups=loadSet("ocsr-board-expanded");
+let showHidden=false, dragging=null, suspend=false, reqSeq=0, focusGroup="";
 const pendingGroups=new Set();  // 会话内新建的空组，拖入首张卡片后由服务端 assignments 持久化
+const GROUP_LIMIT=6;  // 组内默认展示数（参考 opencode/Codex 的 show-more 模式）
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-function toast(msg){const t=$("toast");t.textContent=msg;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,1600);}
+function toast(msg){const t=$("toast");t.textContent=msg;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,2000);}
 async function copyText(text){
   try{await navigator.clipboard.writeText(text);toast("已复制");}
   catch(e){const ta=document.createElement("textarea");ta.value=text;document.body.appendChild(ta);
@@ -126,29 +172,58 @@ function fmtDur(w){
   if(m==null)return "—";
   return m>=60?`${Math.floor(m/60)}h${Math.round(m%60)}m`:`${m}m`;
 }
+function timeOk(iso){
+  const range=$("f-time").value;
+  if(range==="all")return true;
+  if(!iso)return false;
+  const t=Date.parse(iso);if(isNaN(t))return false;
+  const diff=Date.now()-t;
+  if(diff<-60e3)return false;  // 未来时间戳（容忍 1 分钟时钟偏差）不算窗口内
+  if(range==="1h")return diff<=3600e3;
+  if(range==="today")return new Date(t).toDateString()===new Date().toDateString();
+  if(range==="3d")return diff<=3*86400e3;
+  if(range==="7d")return diff<=7*86400e3;
+  return true;
+}
+function workerTime(w){return w.last_activity||w.started_at||"";}  // 最近活动优先：启动早但仍活跃的 worker 不应被时间窗隐藏
 function groupOf(w){return DATA.assignments[w.key]||(w.cwd||"（未知工作目录）");}
 function filtered(){
   const st=$("f-status").value, mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
   return DATA.workers.filter(w=>{
-    if(!showHidden&&hidden.has(w.key))return false;
+    // 「显示已隐藏」只跳过隐藏判定，状态/模型/时间/关键字筛选仍然生效
+    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
     if(st!=="all"&&w.badge!==st)return false;
     if(mo!=="all"&&w.model!==mo)return false;
+    if(!timeOk(workerTime(w)))return false;
     if(q){const hay=(w.label+" "+w.session_id+" "+w.cwd+" "+w.key).toLowerCase();
       if(!hay.includes(q))return false;}
     return true;
   });
 }
 function renderChips(list){
+  // facet 口径：计数跟随模型/时间/关键字/隐藏规则（不含状态筛选本身），
+  // 与点 chip 后看到的数量一致
+  const mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
+  const base=DATA.workers.filter(w=>{
+    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
+    if(mo!=="all"&&w.model!==mo)return false;
+    if(!timeOk(workerTime(w)))return false;
+    if(q&&!(w.label+" "+w.session_id+" "+w.cwd+" "+w.key).toLowerCase().includes(q))return false;
+    return true;
+  });
   const c={active:0,landed:0,timeout:0,stopped:0,failed:0,stale:0};
-  for(const w of DATA.workers)c[w.badge]=(c[w.badge]||0)+1;
+  for(const w of base)c[w.badge]=(c[w.badge]||0)+1;
+  const cur=$("f-status").value;
+  const chip=(st,txt,num,color)=>
+    `<span class="chip${cur===st?" on":""}" data-st="${st}" title="点击筛选；再点取消">${txt}<b${color?` style="color:${color}"`:""}>${num}</b></span>`;
   $("chips").innerHTML=
-    `<span class="chip">● 进行中<b style="color:var(--accent)">${c.active}</b></span>`+
-    `<span class="chip">✓ 落盘<b style="color:var(--green)">${c.landed}</b></span>`+
-    `<span class="chip">⚠ 超时<b style="color:var(--yellow)">${c.timeout}</b></span>`+
-    `<span class="chip">■ 停止<b>${c.stopped}</b></span>`+
-    `<span class="chip">✕ 失败<b style="color:var(--red)">${c.failed}</b></span>`+
-    `<span class="chip">◌ 滞留<b>${c.stale}</b></span>`+
-    `<span class="chip">显示 ${list.length} / ${DATA.workers.length}</span>`;
+    chip("active","● 进行中",c.active,"var(--accent)")+
+    chip("landed","✓ 落盘",c.landed,"var(--green)")+
+    chip("timeout","⚠ 超时",c.timeout,"var(--yellow)")+
+    chip("stopped","■ 停止",c.stopped,"")+
+    chip("failed","✕ 失败",c.failed,"var(--red)")+
+    chip("stale","◌ 滞留",c.stale,"")+
+    `<span class="chip static">显示 ${list.length} / ${DATA.workers.length}</span>`;
 }
 function card(w){
   const sid=w.session_id?`${esc(w.session_id.slice(0,14))}…`:"—";
@@ -176,8 +251,25 @@ function card(w){
     </dl></details>
   </div>`;
 }
+function groupSection(name,ws){
+  const collapsed=collapsedGroups.has(name);  // 聚焦态同样尊重折叠，按钮不做空操作
+  const showAll=expandedGroups.has(name);
+  const shown=showAll?ws:ws.slice(0,GROUP_LIMIT);
+  const more=ws.length>GROUP_LIMIT
+    ?`<div class="more-row"><button data-gact="${showAll?"less":"more"}" data-group="${esc(name)}">${showAll?"收起":`显示全部 ${ws.length} 张`}</button></div>`:"";
+  return `<section class="group${collapsed?" collapsed":""}" data-gname="${esc(name)}">
+    <div class="group-title" data-group="${esc(name)}">
+      <span class="toggle" data-gact="collapse" data-group="${esc(name)}" title="折叠/展开">${collapsed?"▸":"▾"}</span>
+      <span>📁</span><span class="gname" title="${esc(name)}">${esc(name)}</span>
+      <span class="count">(${ws.length})</span>
+      <span class="gops">
+        <button data-gact="focus" data-group="${esc(name)}" title="只看此组">聚焦</button>
+        <button data-gact="hide" data-group="${esc(name)}" title="整组隐藏（视图层，不删文件）">${hiddenGroups.has(name)?"取消隐藏":"隐藏"}</button>
+      </span></div>
+    <div class="cards">${shown.map(card).join("")}</div>${more}</section>`;
+}
 function render(){
-  const list=filtered();
+  let list=filtered();
   renderChips(list);
   const groups=new Map();
   for(const w of list){
@@ -185,32 +277,47 @@ function render(){
     if(!groups.has(g))groups.set(g,[]);
     groups.get(g).push(w);
   }
-  const names=[...groups.keys()].sort((a,b)=>a.localeCompare(b));
+  let names=[...groups.keys()].sort((a,b)=>a.localeCompare(b));
+  if(focusGroup)names=names.filter(n=>n===focusGroup);
   let html="";
   for(const name of names){
     const ws=groups.get(name).sort((a,b)=>(a.badge==="active"?0:1)-(b.badge==="active"?0:1)
       ||(b.started_at||"").localeCompare(a.started_at||""));
-    html+=`<section class="group"><div class="group-title" data-group="${esc(name)}">
-      <span>📁</span><span class="gname" title="${esc(name)}">${esc(name)}</span>
-      <span class="count">(${ws.length})</span></div>
-      <div class="cards">${ws.map(card).join("")}</div></section>`;
+    html+=groupSection(name,ws);
   }
-  // 手动分组目标（含暂无卡片的组：服务端 assignments ∪ 本会话新建的空组）
-  const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])].filter(g=>!groups.has(g));
+  const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])]
+    .filter(g=>!groups.has(g)&&(showHidden||!hiddenGroups.has(g)));  // 隐藏的空手动组同样不渲染
   for(const name of manual){
-    html+=`<section class="group"><div class="group-title" data-group="${esc(name)}">
-      <span>📁</span><span class="gname">${esc(name)}</span><span class="count">(0)</span></div></section>`;
+    if(focusGroup&&name!==focusGroup)continue;
+    html+=groupSection(name,[]);
   }
   if(names.length===0&&manual.length===0)html='<div class="empty">没有匹配的 worker。</div>';
   $("groups").innerHTML=html;
-  $("history").innerHTML=DATA.history.slice().reverse().map(r=>{
+  $("focus-slot").innerHTML=focusGroup
+    ?`<div class="focus-bar">正在聚焦「${esc(focusGroup)}」<button id="btn-unfocus">取消聚焦</button></div>`:"";
+  const q=$("f-q").value.trim().toLowerCase(), mo=$("f-model").value;
+  $("history").innerHTML=DATA.history.slice().reverse().filter(r=>
+    timeOk(r.ts)&&(mo==="all"||r.model===mo)&&(!q||(r.label||"").toLowerCase().includes(q))
+  ).map(r=>{
     const oc=r.outcome==="success"?"ok":(r.outcome||"").includes("timeout")?"warn":"bad";
     return `<tr><td>${esc((r.ts||"").replace("T"," ").slice(5,19))}</td><td>${esc(r.label)}</td>
       <td>${esc(r.model)}</td><td class="${oc}">${esc(r.outcome)}</td>
       <td>${esc(r.wall_min??"—")}</td><td>${esc(r.artifact_bytes??"—")}</td><td>${esc(r.read_audit||"")}</td></tr>`;
   }).join("");
   $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 5s 轮询`;
-  $("btn-show-hidden").textContent=(showHidden?"隐藏已隐藏":"显示已隐藏")+` (${hidden.size})`;
+  $("btn-show-hidden").textContent=(showHidden?"隐藏已隐藏":"显示已隐藏")+` (${hidden.size+hiddenGroups.size})`;
+  renderRoots();
+}
+function renderRoots(){
+  const rows=(DATA.roots||[]).filter(r=>r.kind!=="custom").map(r=>
+    `<div class="rrow"><span class="kind">${r.kind==="default"?"默认":"CLI"}</span>
+     <span class="p">${esc(r.path)}</span></div>`);
+  // 自定义根按配置原样列出：失效目录也可见、可移除
+  for(const r of DATA.custom_roots||[]){
+    rows.push(`<div class="rrow"><span class="kind">${r.exists?"自定义":"已失效"}</span>
+     <span class="p">${esc(r.path)}</span><button data-rpath="${esc(r.path)}">移除</button></div>`);
+  }
+  $("roots-list").innerHTML=rows.join("");
 }
 async function load(){
   const seq=++reqSeq;
@@ -225,7 +332,39 @@ async function load(){
     if(!dragging&&!suspend)render();
   }catch(e){$("meta").textContent="面板服务连接失败";}
 }
+// chips 点击直筛（再点同一 chip 取消）
+$("chips").addEventListener("click",e=>{
+  const chip=e.target.closest(".chip[data-st]");if(!chip)return;
+  $("f-status").value=$("f-status").value===chip.dataset.st?"all":chip.dataset.st;
+  render();
+});
 document.addEventListener("click",async e=>{
+  const gbtn=e.target.closest("[data-gact]");
+  if(gbtn){
+    const g=gbtn.dataset.group, act=gbtn.dataset.gact;
+    if(act==="collapse"){collapsedGroups.has(g)?collapsedGroups.delete(g):collapsedGroups.add(g);
+      saveSet("ocsr-board-collapsed",collapsedGroups);render();}
+    if(act==="focus"){focusGroup=focusGroup===g?"":g;render();}
+    if(act==="hide"){hiddenGroups.has(g)?hiddenGroups.delete(g):hiddenGroups.add(g);
+      saveSet("ocsr-board-hidden-groups",hiddenGroups);
+      if(focusGroup===g&&hiddenGroups.has(g)&&!showHidden)focusGroup="";
+      render();}
+    if(act==="more"){expandedGroups.add(g);saveSet("ocsr-board-expanded",expandedGroups);render();}
+    if(act==="less"){expandedGroups.delete(g);saveSet("ocsr-board-expanded",expandedGroups);render();}
+    return;
+  }
+  const rbtn=e.target.closest("button[data-rpath]");
+  if(rbtn){
+    try{
+      const resp=await fetch("/api/roots",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({action:"remove",path:rbtn.dataset.rpath})});
+      const data=await resp.json();
+      if(!resp.ok){toast(data.error||"移除失败");return;}
+      toast("已移除扫描目录");load();
+    }catch(err){toast("移除失败");}
+    return;
+  }
+  if(e.target.id==="btn-unfocus"){focusGroup="";render();return;}
   const btn=e.target.closest("button[data-act]");
   if(!btn)return;
   const key=btn.closest(".card").dataset.key;
@@ -235,7 +374,7 @@ document.addEventListener("click",async e=>{
   if(btn.dataset.act==="resume")copyText(`python scripts/ocsr_dispatch.py dispatch --resume-from "${w.dir}"`);
   if(btn.dataset.act==="hide"){
     hidden.has(key)?hidden.delete(key):hidden.add(key);
-    localStorage.setItem("ocsr-board-hidden",JSON.stringify([...hidden].slice(-500)));
+    saveSet("ocsr-board-hidden",hidden);
     render();
   }
 });
@@ -277,8 +416,19 @@ $("new-group").addEventListener("keydown",async e=>{
   e.target.value="";
   render();toast(`已创建「${name}」，把卡片拖到该组标题即可`);
 });
+$("btn-roots").addEventListener("click",()=>$("roots-panel").classList.toggle("open"));
+$("btn-root-add").addEventListener("click",async()=>{
+  const path=$("root-path").value.trim();if(!path)return;
+  try{
+    const resp=await fetch("/api/roots",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"add",path})});
+    const data=await resp.json();
+    if(!resp.ok){toast(data.error||"添加失败");return;}
+    $("root-path").value="";toast("已添加扫描目录");load();
+  }catch(err){toast("添加失败");}
+});
 $("btn-show-hidden").addEventListener("click",()=>{showHidden=!showHidden;render();});
-for(const id of["f-status","f-model","f-q"])$(id).addEventListener("input",render);
+for(const id of["f-status","f-model","f-q","f-time"])$(id).addEventListener("input",render);
 load();setInterval(load,5000);
 </script>
 </body>

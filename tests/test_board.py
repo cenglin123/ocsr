@@ -2,8 +2,11 @@ import importlib.util
 import json
 import socket
 import tempfile
+import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -52,7 +55,8 @@ class ScanTest(unittest.TestCase):
             self.assertEqual("C:/work/proj", w["cwd"])
             self.assertEqual("deepseek/deepseek-flash", w["model"])
             self.assertEqual(0, w["exit_code"])
-            self.assertEqual("ocsr_dispatch_20261107_120000_abcd1234/w1", w["key"])
+            self.assertTrue(w["key"].endswith("/ocsr_dispatch_20261107_120000_abcd1234/w1"),
+                            f"key 应含扫描根前缀与 dispatch/label 后缀: {w['key']}")
             self.assertEqual("C:/work/proj", board.default_group(w))
 
     def test_active_duration_computed(self):
@@ -121,6 +125,15 @@ class ScanTest(unittest.TestCase):
             (root / "not-a-dispatch").mkdir()
             self.assertEqual(1, len(board.scan_workers(root, days=7)))
             self.assertEqual(2, len(board.scan_workers(root, days=0)))
+
+    def test_keys_include_root_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_a, root_b = Path(tmp) / "a", Path(tmp) / "b"
+            make_dispatch(root_a)
+            make_dispatch(root_b)
+            keys = {w["key"] for root in (root_a, root_b)
+                    for w in board.scan_workers(root, days=0)}
+            self.assertEqual(2, len(keys))  # 同名 dispatch/label 在不同根下不碰撞
 
 
 class HistoryTest(unittest.TestCase):
@@ -198,6 +211,63 @@ class GroupsTest(unittest.TestCase):
             self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
             self.assertNotIn(b"\r", raw)
 
+    def test_assignment_preserves_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board-groups.json"
+            extra = Path(tmp) / "elsewhere"
+            extra.mkdir()
+            board.mutate_roots("add", str(extra), Path(tmp), path)
+            board.save_assignment("k1", "组", path)
+            config = board.load_config(path)
+            self.assertEqual([str(extra.resolve())], config["roots"])
+            self.assertEqual({"k1": "组"}, config["assignments"])
+
+    def test_legacy_config_without_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board-groups.json"
+            path.write_text('{"assignments": {"a": "b"}}', encoding="utf-8")
+            self.assertEqual([], board.load_config(path)["roots"])
+            self.assertEqual({"a": "b"}, board.load_assignments(path))
+
+
+class RootsTest(unittest.TestCase):
+    def test_add_and_remove(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            base.mkdir()
+            extra = Path(tmp) / "extra"
+            extra.mkdir()
+            path = Path(tmp) / "cfg.json"
+            roots, err = board.mutate_roots("add", str(extra), base, path)
+            self.assertEqual("", err)
+            self.assertEqual([str(extra.resolve())], roots)
+            # 重复添加 / 不存在路径 / 默认根 / 相对路径均拒绝
+            self.assertTrue(board.mutate_roots("add", str(extra), base, path)[1])
+            self.assertTrue(board.mutate_roots("add", str(Path(tmp) / "nope"), base, path)[1])
+            self.assertTrue(board.mutate_roots("add", str(base), base, path)[1])
+            self.assertTrue(board.mutate_roots("add", "relative\\x", base, path)[1])
+            # 移除默认根或不在配置中的目录均拒绝
+            self.assertTrue(board.mutate_roots("remove", str(base), base, path)[1])
+            roots, err = board.mutate_roots("remove", str(extra), base, path)
+            self.assertEqual("", err)
+            self.assertEqual([], roots)
+
+    def test_effective_roots_skip_missing_and_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            base.mkdir()
+            extra = Path(tmp) / "extra"
+            extra.mkdir()
+            path = Path(tmp) / "cfg.json"
+            board.mutate_roots("add", str(extra), base, path)
+            board.mutate_roots("add", str(extra), base, path)  # 重复被拒绝
+            cfg = board.load_config(path)
+            cfg["roots"].append(str(Path(tmp) / "gone"))  # 已不存在的根被跳过
+            board._write_config(cfg, path)
+            roots = board.effective_roots(base, path)
+            self.assertEqual([str(base.resolve()), str(extra.resolve())],
+                             [str(r.resolve()) for r in roots])
+
 
 class ValidationTest(unittest.TestCase):
     def test_group_payload(self):
@@ -274,6 +344,89 @@ class PortTest(unittest.TestCase):
             holder.close()
         self.assertEqual("moved", action)
         self.assertGreater(got, port)
+
+
+class HttpApiTest(unittest.TestCase):
+    """真实 BoardServer + urllib 的端点契约测试（独立配置与根，不碰本机数据）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+
+        class Handler(board.BoardHandler):
+            pass
+
+        Handler.groups_path = root / "cfg.json"
+        Handler.base_root = root / "base"
+        Handler.base_root.mkdir()
+        Handler.cli_roots = []
+        Handler.days = 0
+        Handler.log_path = root / "dispatch-log.jsonl"
+        self.server = board.BoardServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.tmp.cleanup()
+
+    def _post(self, path, payload, content_type="application/json", host=None):
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=body, method="POST")
+        req.add_header("Content-Type", content_type)
+        if host:
+            req.add_header("Host", host)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    def test_roots_content_type_rejected(self):
+        status, _ = self._post("/api/roots", {"action": "add", "path": "x"}, content_type="text/plain")
+        self.assertEqual(415, status)
+
+    def test_foreign_host_forbidden(self):
+        status, _ = self._post("/api/roots", {"action": "add", "path": "x"}, host="evil.com")
+        self.assertEqual(403, status)
+
+    def test_unknown_action_400(self):
+        status, _ = self._post("/api/roots", {"action": "purge", "path": "x"})
+        self.assertEqual(400, status)
+
+    def test_add_remove_roundtrip_and_missing_root_visible(self):
+        extra = Path(self.tmp.name) / "extra"
+        extra.mkdir()
+        status, body = self._post("/api/roots", {"action": "add", "path": str(extra)})
+        self.assertEqual(200, status)
+        self.assertEqual([str(extra.resolve())], body["roots"])
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/state", timeout=10) as resp:
+            state = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(state["custom_roots"][0]["exists"])
+        # 目录失效后仍列出（exists=False）且可移除，不留幽灵配置
+        extra.rmdir()
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/state", timeout=10) as resp:
+            state = json.loads(resp.read().decode("utf-8"))
+        self.assertFalse(state["custom_roots"][0]["exists"])
+        status, body = self._post("/api/roots", {"action": "remove", "path": str(extra.resolve())})
+        self.assertEqual(200, status)
+        self.assertEqual([], body["roots"])
+
+    def test_negative_content_length_400(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s:
+            s.sendall(b"POST /api/groups HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                      b"Content-Type: application/json\r\nContent-Length: -5\r\n"
+                      b"Connection: close\r\n\r\n")
+            chunks = []
+            while True:
+                data = s.recv(65536)
+                if not data:
+                    break
+                chunks.append(data)
+        self.assertIn(b"400", b"".join(chunks).split(b"\r\n")[0])
 
 
 if __name__ == "__main__":

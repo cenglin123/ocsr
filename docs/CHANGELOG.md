@@ -2,6 +2,20 @@
 
 ## 2026-11-07
 
+### Board 交互增强：chips 直筛、时间筛选与文件夹管理
+
+#### 变更内容
+- 交互模式借鉴社区实现（opencode/Codex 的项目分组折叠与 show-more、Vibe Kanban 的 archive/搜索），不引入框架。
+- 状态 chips 点击直筛（再点取消、选中高亮）；计数跟随其余筛选条件（facet 口径）。时间筛选（近 1h/今天/近 3 天/近 7 天/全部）按最近活动时间判定并含下界，作用于卡片与遥测历史。
+- 文件夹组管理：折叠/展开、聚焦单组、整组隐藏（视图层）、组内默认 6 张 + 显示全部；状态持久化于 localStorage。
+- 扫描根在线管理：/api/roots 增删自定义扫描根并持久化到 board-groups.json 的 roots 字段；默认 TEMP + CLI --work-dir + 自定义根叠加（--work-dir 为追加语义）；失效根以「已失效」列出且可移除。
+- 独立 fresh 复查（deepseek/deepseek-flash）REVISE，13 项发现全部修复：显示已隐藏不再短路其余筛选、空手动组随整组隐藏消失、配置读-改-写加锁、跨根 worker key 加根哈希前缀隔离、失效根可管理、聚焦态折叠生效、时间窗下界、saveSet 容错、chips facet 计数、HTTP 端点契约测试（415/403/400/负 Content-Length/失效根往返）等。
+- 30 项面板离线测试；438 passed（432+6），verify 13/13、audit 通过；chips/时间/折叠/聚焦/隐藏/show-more/roots 增删均 playwright 实测。评审报告存 .review/board-ux-20261107/（gitignored），调用预算 2/2。
+
+#### 迁移影响
+- worker key 新增扫描根哈希前缀（跨根同名 dispatch/label 不再共享状态）；此前版本保存的手动分组/隐藏记录需重新操作一次。
+- 自定义扫描根写入 ~/.ocsr/board-groups.json 的 roots 字段（旧配置向后兼容）；--work-dir 由替换语义明确为追加。
+
 ### 新增 OCSR Board 只读网页面板
 
 #### 变更内容
