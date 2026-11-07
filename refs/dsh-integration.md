@@ -5,7 +5,7 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 ## 安装
 
 - 本地：`dsh plugin --profile <p> add .`（在仓库根目录运行；`dsh` 会把相对路径锚定到当前目录）。
-- 发布：npm 包 `dsh-ocsr`（`dsh plugin --profile <p> add dsh-ocsr`）；未发布前用 GitHub 源安装 `dsh plugin --profile <p> add github:cenglin123/ocsr`。
+- 发布：npm 包名 `dsh-ocsr`（**尚未发布**，待 npm 账号可用时执行 `npm publish`）；当前安装用 GitHub 源 `dsh plugin --profile <p> add github:cenglin123/ocsr`。
 - 安装后 `dsh.profile.bundles` 自动加入 `dsh-ocsr`；`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，在 profile 层插入两个 entry：`ocsr-skill`（`dsh-ocsr`，技能 provider）与 `ocsr-tools`（`dsh-ocsr/tool`，派发工具）。
 - **版本门（dsh 0.2.2）**：安装预检只读插件 manifest，不加载插件代码。`engines.dsh` 存在时它是唯一依据（本包的 `@deepseek-ai/dsh*` peer 因此不参与判定），否则逐个检查 dsh peer。不满足时安装命令拒绝并把不兼容项写进诊断；要强行安装须 `dsh plugin --profile <p> allow-version <name>@<version> --dsh-version <dsh-version> --accept-risk` 做精确版本豁免（等于自行承担崩溃/数据损坏风险，不建议）。已安装但不兼容的 bundle 在加载期被 skip，stderr 打印 `skipping profile bundle ...`，不会以旧契约静默运行。本包声明 `engines.dsh: ^0.2.2-rc.1`。
 
