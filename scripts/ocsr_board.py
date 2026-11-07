@@ -31,9 +31,9 @@ from typing import Any
 APP_NAME = "ocsr_board"
 APP_VERSION = 1
 DEFAULT_PORT = 8787
-PORT_PROBE_LIMIT = 20
+PORT_PROBE_LIMIT = 10  # 占用时探测 8788..8797
 
-OCSR_HOME = Path(os.environ.get("OCSR_HOME") or (Path.home() / ".ocsr"))
+OCSR_HOME = Path.home() / ".ocsr"  # 与 dispatcher 的 DISPATCH_LOG 一致，不随 OCSR_HOME 环境变量分叉
 DISPATCH_LOG = OCSR_HOME / "dispatch-log.jsonl"
 GROUPS_PATH = OCSR_HOME / "board-groups.json"
 INDEX_HTML = Path(__file__).resolve().parent / "board" / "index.html"
@@ -98,16 +98,19 @@ def scan_worker_dir(wd: Path, dispatch_name: str, started: datetime | None) -> d
     state = _load_json(wd / "worker-state.json")
     binding = _load_json(wd / "session-binding.json")
     raw_state = state.get("state") or "launched"
-    badge, badge_text = BADGE_BY_STATE.get(raw_state, ("active", "● 进行中"))
     exit_code = _read_exit_code(wd / "start.marker")
-    if exit_code not in (None, 0) and raw_state != "landed":
-        badge, badge_text = "failed", "✕ 失败"
-    elif badge == "active":
-        # watcher 已不在推进的证据：进程正常退出但未标 landed，或已越过不可变总期限。
-        # 面板只投影证据，不发明新事实——这类标为滞留而非进行中。
+    if raw_state in BADGE_BY_STATE:
+        # watcher 写下的显式终态优先，不被 start.marker 退出码覆盖
+        badge, badge_text = BADGE_BY_STATE[raw_state]
+    else:
+        # watcher 未推进的证据：进程退出但未标 landed，或已越过不可变总期限。
+        # 面板只投影证据，不发明新事实——这类标为中性灰，不冒充进行中。
+        badge, badge_text = "active", "● 进行中"
         deadline = state.get("total_deadline")
         overdue = isinstance(deadline, (int, float)) and time.time() > deadline
-        if exit_code == 0:
+        if exit_code not in (None, 0):
+            badge, badge_text = "failed", "✕ 失败"
+        elif exit_code == 0:
             badge, badge_text = "stale", "◌ 已退出·未验收"
         elif overdue:
             badge, badge_text = "stale", "◌ 失联·超期"
@@ -212,29 +215,50 @@ def read_history(log_path: Path, limit: int = 200, tail_bytes: int = 2_000_000) 
     return records[-limit:]
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def attach_telemetry(workers: list[dict[str, Any]], history: list[dict[str, Any]]) -> None:
-    """用同 label 且时间不早于启动的最近一条遥测补全 wall_min/产物等信息。"""
+    """补全 wall_min/产物等；同 label 多次运行时，取「不早于该 worker 启动的
+    最早一条」遥测（同 label 串行运行：本次运行完成时间早于下一次启动，
+    取最新一条会串到别的运行）。遥测明确的 error/timeout 终态校正徽章。"""
     by_label: dict[str, list[dict[str, Any]]] = {}
     for rec in history:
         by_label.setdefault(rec.get("label", ""), []).append(rec)
+    for recs in by_label.values():
+        recs.sort(key=lambda r: r.get("ts", ""))
     for w in workers:
         cands = by_label.get(w["label"], [])
         if not cands:
             continue
-        started_iso = w.get("started_at") or ""
+        started = _parse_iso(w.get("started_at"))
         best = None
         for rec in cands:
-            ts = rec.get("ts", "")
-            if started_iso and ts and ts < started_iso[:10]:
-                continue
-            if best is None or rec.get("ts", "") > best.get("ts", ""):
-                best = rec
+            ts = _parse_iso(rec.get("ts"))
+            if started is not None and ts is not None and ts < started:
+                continue  # 属于更早的运行
+            best = rec
+            break
         if best is None:
             continue
         w["wall_min"] = best.get("wall_min")
         w["artifact_bytes"] = best.get("artifact_bytes")
         w["outcome_detail"] = best.get("outcome_detail", "")
         w["read_audit"] = best.get("read_audit", "")
+        od = w["outcome_detail"]
+        # exit_0_no_artifact 等失败只存在于遥测（worker-state 无 failed 值域），
+        # 据此校正；watcher 显式终态（landed/stopped/timed_out）不动。
+        if w["badge"] in ("active", "stale"):
+            if od.startswith("error"):
+                w["badge"], w["badge_text"] = "failed", "✕ 失败"
+            elif od.startswith("timeout"):
+                w["badge"], w["badge_text"] = "timeout", "⚠ 超时"
         if w["badge"] == "active" and w["duration_min"] is None:
             w["duration_min"] = w["wall_min"]
 
@@ -349,11 +373,43 @@ class BoardServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
+def host_allowed(host_header: str, port: int) -> bool:
+    """仅接受本机回环 Host（防 DNS rebinding 读取本机路径/session）。"""
+    host = (host_header or "").strip().lower()
+    if host.startswith("[") and "]" in host:  # IPv6 形式 [::1]:8787
+        name, _, rest = host[1:].partition("]")
+        return name == "::1" and rest in ("", f":{port}")
+    name, sep, p = host.rpartition(":")
+    if sep:
+        try:
+            if int(p) != port:
+                return False
+        except ValueError:
+            return False
+    else:
+        name = host
+    return name in ("127.0.0.1", "localhost")
+
+
+def validate_group_payload(data: Any) -> tuple[str, str] | None:
+    """校验 /api/groups 输入；合法返回 (key, group)，否则 None。group 空=清除分配。"""
+    if not isinstance(data, dict):
+        return None
+    key, group = data.get("key"), data.get("group", "")
+    if not isinstance(key, str) or not isinstance(group, str):
+        return None
+    if not (1 <= len(key) <= 512) or len(group) > 120:
+        return None
+    if any(ord(c) < 32 for c in key + group):
+        return None
+    return key, group
+
+
 class BoardHandler(BaseHTTPRequestHandler):
     server_version = "OCSRBoard/1"
     started_at = time.time()
     days = 7
-    temp_root = Path(tempfile.gettempdir())
+    temp_roots: list[Path] = [Path(tempfile.gettempdir())]
     log_path = DISPATCH_LOG
     groups_path = GROUPS_PATH
 
@@ -372,14 +428,24 @@ class BoardHandler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    def _origin_ok(self) -> bool:
+        if not host_allowed(self.headers.get("Host", ""), self.server.server_address[1]):
+            self._json({"error": "forbidden"}, 403)
+            return False
+        return True
+
     def do_GET(self) -> None:
+        if not self._origin_ok():
+            return
         path = self.path.split("?", 1)[0]
         if path == "/api/identity":
             self._json({"app": APP_NAME, "version": APP_VERSION, "pid": os.getpid(),
                         "port": self.server.server_address[1],
                         "started_at": self.started_at})
         elif path == "/api/state":
-            workers = scan_workers(self.temp_root, self.days)
+            workers: list[dict[str, Any]] = []
+            for root in self.temp_roots:
+                workers.extend(scan_workers(root, self.days))
             history = read_history(self.log_path)
             attach_telemetry(workers, history)
             dir_labels = {w["key"] for w in workers}
@@ -401,30 +467,54 @@ class BoardHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
+        if not self._origin_ok():
+            return
         if self.path != "/api/groups":
             self._json({"error": "not found"}, 404)
+            return
+        # 只接受 application/json（非 simple request，跨源浏览器表单无法伪造）
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._json({"error": "unsupported content type"}, 415)
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             data = json.loads(self.rfile.read(min(length, 65536)).decode("utf-8"))
-            key = str(data["key"])
-            group = str(data.get("group", ""))
-        except (ValueError, KeyError, json.JSONDecodeError):
+        except (ValueError, json.JSONDecodeError):
             self._json({"error": "bad request"}, 400)
             return
-        self._json({"assignments": save_assignment(key, group, self.groups_path)})
+        payload = validate_group_payload(data)
+        if payload is None:
+            self._json({"error": "bad request"}, 400)
+            return
+        self._json({"assignments": save_assignment(payload[0], payload[1], self.groups_path)})
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="OCSR 只读网页面板")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--days", type=int, default=7, help="扫描最近 N 天的派发目录；0=全部")
+    ap.add_argument("--work-dir", action="append", default=None,
+                    help="派发工作根目录（dispatcher --work-dir 的对应位置；可重复，默认 $TEMP）")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    port, action = ensure_port(port=args.port)
     BoardHandler.days = args.days
-    server = BoardServer(("127.0.0.1", port), BoardHandler)
+    if args.work_dir:
+        BoardHandler.temp_roots = [Path(d) for d in args.work_dir]
+
+    # 探测与正式 bind 之间端口可能被抢占：bind 失败时重走 ensure_port（自动换端口/重启判断）
+    server = None
+    for _ in range(2):
+        port, action = ensure_port(port=args.port)
+        try:
+            server = BoardServer(("127.0.0.1", port), BoardHandler)
+            break
+        except OSError:
+            continue
+    if server is None:
+        print(f"[board] 端口 {args.port} 附近均被占用或绑定失败", file=sys.stderr)
+        return 1
     url = f"http://127.0.0.1:{port}"
     note = {"fresh": "", "restarted": "（旧实例已终止，同端口重启）",
             "moved": f"（{args.port} 被非面板程序占用，已换端口）"}[action]

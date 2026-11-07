@@ -107,8 +107,11 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
 <script>
 "use strict";
 let DATA={workers:[],history:[],assignments:{},generated_at:""};
-let hidden=new Set(JSON.parse(localStorage.getItem("ocsr-board-hidden")||"[]"));
-let showHidden=false, dragging=null, suspend=false;
+let hidden=new Set();
+try{const raw=JSON.parse(localStorage.getItem("ocsr-board-hidden")||"[]");
+  if(Array.isArray(raw))hidden=new Set(raw.filter(x=>typeof x==="string"));}catch(e){}
+let showHidden=false, dragging=null, suspend=false, reqSeq=0;
+const pendingGroups=new Set();  // 会话内新建的空组，拖入首张卡片后由服务端 assignments 持久化
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
@@ -154,7 +157,7 @@ function card(w){
   return `<div class="card" draggable="true" data-key="${esc(w.key)}">
     <div class="top"><span class="label" title="${esc(w.key)}">${esc(w.label)}</span>
       <span class="badge b-${w.badge}">${esc(w.badge_text)}</span></div>
-    <div class="kv"><b>${esc(w.model||"?")}</b> · ${dur} · 尝试 ${w.attempt_index??"?"}/3${w.rework_index?` · 返工 ${w.rework_index}`:""}</div>
+    <div class="kv"><b>${esc(w.model||"?")}</b> · ${dur} · 尝试 ${esc(w.attempt_index??"?")}/3${w.rework_index?` · 返工 ${esc(w.rework_index)}`:""}</div>
     <div class="kv">session: ${sid} ${w.session_id?`<button data-act="sid">⧉</button>`:""}</div>
     <div class="durbar"><i style="width:${durPct}%"></i></div>
     <div class="actions">
@@ -167,9 +170,9 @@ function card(w){
       <dt>session</dt><dd>${esc(w.session_id||"—")}</dd>
       <dt>启动</dt><dd>${esc((w.started_at||"").replace("T"," ").slice(0,19)||"—")}</dd>
       <dt>最后活动</dt><dd>${esc((w.last_activity||"").replace("T"," ").slice(0,19)||"—")}</dd>
-      <dt>状态</dt><dd>${esc(w.state)} · exit=${w.exit_code??"—"} · 续期 ${w.renewal_count??0}</dd>
+      <dt>状态</dt><dd>${esc(w.state)} · exit=${esc(w.exit_code??"—")} · 续期 ${esc(w.renewal_count??0)}</dd>
       <dt>结果</dt><dd>${esc(w.outcome_detail||"—")} ${w.read_audit?`· 读审计 ${esc(w.read_audit)}`:""}</dd>
-      <dt>产物</dt><dd>${w.artifact_bytes??"—"} B</dd>
+      <dt>产物</dt><dd>${esc(w.artifact_bytes??"—")} B</dd>
     </dl></details>
   </div>`;
 }
@@ -192,8 +195,8 @@ function render(){
       <span class="count">(${ws.length})</span></div>
       <div class="cards">${ws.map(card).join("")}</div></section>`;
   }
-  // 手动分组目标（含暂无卡片的组）
-  const manual=[...new Set(Object.values(DATA.assignments))].filter(g=>!groups.has(g));
+  // 手动分组目标（含暂无卡片的组：服务端 assignments ∪ 本会话新建的空组）
+  const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])].filter(g=>!groups.has(g));
   for(const name of manual){
     html+=`<section class="group"><div class="group-title" data-group="${esc(name)}">
       <span>📁</span><span class="gname">${esc(name)}</span><span class="count">(0)</span></div></section>`;
@@ -204,15 +207,18 @@ function render(){
     const oc=r.outcome==="success"?"ok":(r.outcome||"").includes("timeout")?"warn":"bad";
     return `<tr><td>${esc((r.ts||"").replace("T"," ").slice(5,19))}</td><td>${esc(r.label)}</td>
       <td>${esc(r.model)}</td><td class="${oc}">${esc(r.outcome)}</td>
-      <td>${r.wall_min??"—"}</td><td>${r.artifact_bytes??"—"}</td><td>${esc(r.read_audit||"")}</td></tr>`;
+      <td>${esc(r.wall_min??"—")}</td><td>${esc(r.artifact_bytes??"—")}</td><td>${esc(r.read_audit||"")}</td></tr>`;
   }).join("");
   $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 5s 轮询`;
   $("btn-show-hidden").textContent=(showHidden?"隐藏已隐藏":"显示已隐藏")+` (${hidden.size})`;
 }
 async function load(){
+  const seq=++reqSeq;
   try{
     const resp=await fetch("/api/state");
-    DATA=await resp.json();
+    const data=await resp.json();
+    if(seq!==reqSeq)return;  // 只接受最新请求，防止旧响应覆盖刚保存的分组
+    DATA=data;
     const models=[...new Set(DATA.workers.map(w=>w.model).filter(Boolean))].sort();
     const sel=$("f-model"), cur=sel.value;
     sel.innerHTML='<option value="all">全部模型</option>'+models.map(m=>`<option${m===cur?" selected":""}>${esc(m)}</option>`).join("");
@@ -229,7 +235,7 @@ document.addEventListener("click",async e=>{
   if(btn.dataset.act==="resume")copyText(`python scripts/ocsr_dispatch.py dispatch --resume-from "${w.dir}"`);
   if(btn.dataset.act==="hide"){
     hidden.has(key)?hidden.delete(key):hidden.add(key);
-    localStorage.setItem("ocsr-board-hidden",JSON.stringify([...hidden]));
+    localStorage.setItem("ocsr-board-hidden",JSON.stringify([...hidden].slice(-500)));
     render();
   }
 });
@@ -259,21 +265,17 @@ document.addEventListener("drop",async e=>{
     const resp=await fetch("/api/groups",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({key,group:target})});
     const data=await resp.json();DATA.assignments=data.assignments||{};
+    pendingGroups.add(target);
     render();toast(`已归入「${target}」`);
+    load();  // 以最新序号拉取，消除与在途轮询的覆盖竞态
   }catch(err){toast("分组保存失败");}
 });
 $("new-group").addEventListener("keydown",async e=>{
   if(e.key!=="Enter")return;
   const name=e.target.value.trim();if(!name)return;
-  // 新组通过一条占位 assignment 注册不可行（无 worker 时不持久化）；
-  // 直接把当前筛选的第一张卡片移入作为组的创建动作太隐晦，改为提示拖放。
-  toast(`把卡片拖到下方「${name}」组标题即可（新组随首次拖放创建）`);
-  if(![...document.querySelectorAll(".group-title")].some(g=>g.dataset.group===name)){
-    const sec=document.createElement("section");sec.className="group";
-    sec.innerHTML=`<div class="group-title" data-group="${esc(name)}">📁 <span class="gname">${esc(name)}</span><span class="count">(0)</span></div>`;
-    $("groups").appendChild(sec);
-  }
+  pendingGroups.add(name);  // 空组随 render 保留，拖入卡片后经服务端 assignments 持久化
   e.target.value="";
+  render();toast(`已创建「${name}」，把卡片拖到该组标题即可`);
 });
 $("btn-show-hidden").addEventListener("click",()=>{showHidden=!showHidden;render();});
 for(const id of["f-status","f-model","f-q"])$(id).addEventListener("input",render);

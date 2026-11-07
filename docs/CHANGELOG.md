@@ -2,6 +2,21 @@
 
 ## 2026-11-07
 
+### 新增 OCSR Board 只读网页面板
+
+#### 变更内容
+- 新增 scripts/ocsr_board.py + scripts/board/index.html：127.0.0.1 只读面板，扫描派发目录与 dispatch-log 遥测，展示 worker 状态/时长/session ID；支持 cwd 默认分组、拖动手动分组（~/.ocsr/board-groups.json 持久化）、状态/模型/关键字筛选、返工命令复制与视图层隐藏；不参与派发/看门狗/遥测链路，面板唯一可写文件为 board-groups.json。
+- 端口策略：默认 8787；旧面板实例经 /api/identity 识别后 KILL 并同端口重启；外部程序占用顺序换 8788..8797 且不 kill 外部进程；Windows 禁用 SO_REUSEADDR（防止强行绑定已占用端口使探测失效）；探测与正式 bind 之间被抢占时自动重走端口选择。
+- 状态诚实性：watcher 显式终态优先于退出码；进程退出未验收/越过 total_deadline 标灰色滞留，不冒充进行中；遥测 error/timeout（含 exit_0_no_artifact，worker-state 无 failed 值域）校正徽章；同 label 串行运行按「启动后最早一条」归属遥测，避免串到别的运行。
+- 安全：Host 回环校验防 DNS rebinding；POST 仅收 application/json 并校验类型/长度/控制字符；前端全字段转义；轮询以请求序号防旧响应覆盖分组，指针按下卡片起暂停重渲染防拖动换牌。
+- 20 项合成离线测试（tests/test_board.py，动态时间戳/动态端口，无环境耦合）；428 passed（408 基线 + 20 新增），verify 13/13、audit 通过；三端口场景与拖放/分组持久化经本机真实数据 playwright 实测。
+- 独立 fresh 复查（deepseek/deepseek-flash）REVISE，12 项发现（状态推导、遥测归属、输入校验、前端竞态、测试环境耦合等）全部修复并复验；报告与冻结 diff 存 .review/ocsr-board-20261107/（gitignored）。调用预算 2/2（1 preflight + 1 派发）。
+
+#### 迁移影响
+- 面板为可选辅助工具，不启动即无影响；历史遥测/派发目录不因面板改变。
+- 面板 dispatch-log 路径固定 ~/.ocsr/dispatch-log.jsonl（与 dispatcher 对齐，不随 OCSR_HOME 分叉）；--work-dir 对应 dispatcher 自定义工作目录，可重复指定。
+- 非 watch 派发成功无遥测可配，卡片显示「已退出·未验收」是证据投影而非异常；真实失败会经遥测校正为红色失败。
+
 ### dsh 适配层迁移到 0.2.2-rc.1
 
 #### 变更内容
