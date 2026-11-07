@@ -297,10 +297,17 @@ def _write_config(config: dict[str, Any], path: Path) -> None:
     tmp.write_text(json.dumps(config, ensure_ascii=False, indent=1) + "\n",
                    encoding="utf-8", newline="\n")
     os.replace(tmp, path)
+    _STATE_CACHE["at"] = 0.0  # 配置变更立即使扫描缓存失效（分组/根改动下次请求即可见）
 
 
 # ThreadingHTTPServer 下两个写端点共用此锁，保护配置的读-改-写与固定 tmp 文件名
 _CONFIG_LOCK = threading.Lock()
+
+# /api/state 扫描缓存：Windows + Defender 下单次全量扫描需秒级，
+# 多客户端轮询共享 TTL 内的缓存，避免每个请求都全量重扫拖满 CPU。
+_STATE_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
+_STATE_CACHE_TTL = 10.0  # 秒
+_STATE_LOCK = threading.Lock()  # 扫描互斥（与配置写锁分离）
 
 
 def save_assignment(key: str, group: str, path: Path = GROUPS_PATH) -> dict[str, str]:
@@ -440,6 +447,37 @@ def ensure_port(host: str = "127.0.0.1", port: int = DEFAULT_PORT,
 # HTTP
 # ---------------------------------------------------------------------------
 
+def build_state(handler: "BoardHandler", force: bool = False) -> dict[str, Any]:
+    """/api/state 的数据构建，带 TTL 缓存（fresh=1 强制重扫并刷新缓存）。"""
+    with _STATE_LOCK:
+        if not force and _STATE_CACHE["payload"] is not None \
+                and time.monotonic() - _STATE_CACHE["at"] < _STATE_CACHE_TTL:
+            return _STATE_CACHE["payload"]
+        cfg = load_config(handler.groups_path)
+        custom = cfg["roots"]
+        roots = effective_roots(handler.base_root, handler.groups_path, handler.cli_roots)
+        workers: list[dict[str, Any]] = []
+        for root in roots:
+            workers.extend(scan_workers(root, handler.days))
+        history = read_history(handler.log_path)
+        attach_telemetry(workers, history)
+        payload = {
+            "workers": workers,
+            "history": history,
+            "assignments": cfg["assignments"],
+            "roots": [{"path": str(r), "kind": "default" if r == handler.base_root
+                       else ("cli" if r in handler.cli_roots else "custom")}
+                      for r in roots],
+            # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
+            "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "dir_count": len({w["key"] for w in workers}),
+            "cache_ttl": _STATE_CACHE_TTL,
+        }
+        _STATE_CACHE.update(at=time.monotonic(), payload=payload)
+        return payload
+
+
 class BoardServer(ThreadingHTTPServer):
     # Windows 上 allow_reuse_address 会让 bind 在端口被占用时也成功，必须禁用。
     allow_reuse_address = False
@@ -517,27 +555,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                         "port": self.server.server_address[1],
                         "started_at": self.started_at})
         elif path == "/api/state":
-            cfg = load_config(self.groups_path)
-            custom = cfg["roots"]
-            roots = effective_roots(self.base_root, self.groups_path, self.cli_roots)
-            workers: list[dict[str, Any]] = []
-            for root in roots:
-                workers.extend(scan_workers(root, self.days))
-            history = read_history(self.log_path)
-            attach_telemetry(workers, history)
-            dir_labels = {w["key"] for w in workers}
-            self._json({
-                "workers": workers,
-                "history": history,
-                "assignments": cfg["assignments"],
-                "roots": [{"path": str(r), "kind": "default" if r == self.base_root
-                           else ("cli" if r in self.cli_roots else "custom")}
-                          for r in roots],
-                # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
-                "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
-                "generated_at": datetime.now().astimezone().isoformat(),
-                "dir_count": len(dir_labels),
-            })
+            self._json(build_state(self, force="fresh=1" in self.path))
         elif path == "/":
             try:
                 body = INDEX_HTML.read_bytes()

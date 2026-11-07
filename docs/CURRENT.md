@@ -1,9 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-11-07
+更新时间：2026-11-08
 
 ## 当前状态
 
+- Board 第三轮增强已落地：组内时间排序、卡片/列表视图（启动时间列）、失败原因直显、归档工作流（批量归档已结束 + 已归档视图可恢复，组归档单张恢复拆逐卡）、/api/state 10s 扫描缓存 + 自适应轮询（修复大 TEMP 目录下面板持续高 CPU，缓存命中 14–31ms）。439 passed（438+1），verify 13/13、audit、diff/eol 通过；全部新交互 playwright 实测。fresh reviewer（deepseek-flash）REVISE，9 项发现全部修复并实测；报告 `.review/board-list-sort-20261107/`。预算 2/2，修补主会话验收。
 - OCSR Board 第二轮交互增强已落地：状态 chips 点击直筛、时间窗筛选（最近活动时间口径）、文件夹组折叠/聚焦/整组隐藏/组内限量展开、扫描根在线增删（board-groups.json 的 roots 字段，失效根可移除）。438 passed（432+6），verify 13/13、audit、diff/eol 通过；全部新交互 playwright 实测。fresh reviewer（deepseek-flash）REVISE，13 项发现全部修复并复验；报告 `.review/board-ux-20261107/`。预算 2/2。worker key 新增扫描根哈希前缀，此前手动分组/隐藏记录需重新操作一次。
 
 - OCSR Board 只读网页面板已落地：`python scripts/ocsr_board.py`（默认 8787；旧面板实例自动 KILL 重启，外部占用换 8788..8797）。深色单页：状态/时长/session ID 卡片、cwd 默认分组 + 拖动分组持久化、筛选、返工命令复制；只读证据，不写 OCSR 文件（唯一例外 ~/.ocsr/board-groups.json）。428 passed（408 基线 + 20 面板测试），verify 13/13、audit、diff/eol 通过；三端口场景与拖放经本机真实数据 playwright 实测。fresh reviewer（deepseek/deepseek-flash）REVISE，12 项发现全部修复并复验；报告与冻结 diff 存 `.review/ocsr-board-20261107/`。调用预算 2/2（1 preflight + 1 派发）。

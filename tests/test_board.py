@@ -403,12 +403,12 @@ class HttpApiTest(unittest.TestCase):
         status, body = self._post("/api/roots", {"action": "add", "path": str(extra)})
         self.assertEqual(200, status)
         self.assertEqual([str(extra.resolve())], body["roots"])
-        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/state", timeout=10) as resp:
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/state?fresh=1", timeout=10) as resp:
             state = json.loads(resp.read().decode("utf-8"))
         self.assertTrue(state["custom_roots"][0]["exists"])
         # 目录失效后仍列出（exists=False）且可移除，不留幽灵配置
         extra.rmdir()
-        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/state", timeout=10) as resp:
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/state?fresh=1", timeout=10) as resp:
             state = json.loads(resp.read().decode("utf-8"))
         self.assertFalse(state["custom_roots"][0]["exists"])
         status, body = self._post("/api/roots", {"action": "remove", "path": str(extra.resolve())})
@@ -427,6 +427,34 @@ class HttpApiTest(unittest.TestCase):
                     break
                 chunks.append(data)
         self.assertIn(b"400", b"".join(chunks).split(b"\r\n")[0])
+
+
+class StateCacheTest(unittest.TestCase):
+    def setUp(self):
+        board._STATE_CACHE.update(at=0.0, payload=None)
+
+    def tearDown(self):
+        board._STATE_CACHE.update(at=0.0, payload=None)
+
+    def test_cache_hit_and_invalidation_on_config_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            class H:  # 轻量 handler 替身（仅提供 build_state 所需属性）
+                groups_path = root / "cfg.json"
+                base_root = root / "base"
+                cli_roots: list = []
+                days = 0
+                log_path = root / "log.jsonl"
+
+            H.base_root.mkdir()
+            p1 = board.build_state(H)
+            self.assertIs(p1, board.build_state(H))  # TTL 内命中缓存，未重扫
+            self.assertIsNot(p1, board.build_state(H, force=True))  # fresh 强制重扫
+            board.save_assignment("k", "g", H.groups_path)
+            self.assertEqual(0.0, board._STATE_CACHE["at"])  # 配置写使缓存失效
+            p3 = board.build_state(H)
+            self.assertEqual({"k": "g"}, p3["assignments"])
 
 
 if __name__ == "__main__":

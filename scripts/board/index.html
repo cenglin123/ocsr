@@ -48,7 +48,7 @@ main{padding:14px 20px 40px}
 .group-title .gops button{padding:0 6px;font-size:11px;border-color:transparent}
 .group-title .gops button:hover{border-color:var(--accent)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;padding:10px 0 0}
-.group.collapsed .cards,.group.collapsed .more-row{display:none}
+.group.collapsed .cards,.group.collapsed .more-row,.group.collapsed .wtable{display:none}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px 12px;cursor:grab}
 .card:active{cursor:grabbing}
 .card .top{display:flex;align-items:center;gap:8px}
@@ -69,9 +69,21 @@ main{padding:14px 20px 40px}
 .b-failed{color:var(--red)}
 .b-stopped{color:var(--dim)}
 .b-stale{color:var(--faint)}
+.fail-reason{color:var(--red);font-size:11px;margin-top:4px}
 @keyframes pulse{50%{opacity:.45}}
 .durbar{height:3px;background:var(--border);border-radius:2px;margin-top:8px;overflow:hidden}
 .durbar i{display:block;height:100%;background:var(--accent);opacity:.7}
+.wtable{width:100%;border-collapse:collapse;margin-top:8px}
+.wtable td{border-bottom:1px solid var(--border);padding:5px 8px;white-space:nowrap}
+.wtable td.l-label{font-weight:700;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.wtable td.l-model{max-width:170px;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
+.wtable td.l-time{color:var(--dim)}
+.wtable tr[data-key]{cursor:grab}
+.wtable tr[data-key]:hover td{background:#161616}
+.wtable .detail-row td{white-space:normal;background:var(--panel);font-size:11px;color:var(--dim)}
+.wtable .detail-row dl{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin:4px 0}
+.wtable .detail-row dt{color:var(--faint)}
+.wtable .detail-row dd{margin:0;word-break:break-all}
 .more-row{padding:6px 0 0}
 .more-row button{color:var(--faint);border-style:dashed;width:100%}
 .more-row button:hover{color:var(--accent)}
@@ -119,9 +131,20 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
     <option value="7d">近 7 天</option>
   </select>
   <input id="f-q" placeholder="筛选 label / session / 路径" size="22">
+  <select id="sort-by" title="组内排序">
+    <option value="started_desc">时间倒序</option>
+    <option value="started_asc">时间正序</option>
+    <option value="status">状态优先</option>
+  </select>
+  <select id="view-mode" title="展示方式">
+    <option value="cards">卡片视图</option>
+    <option value="list">列表视图</option>
+  </select>
   <input id="new-group" placeholder="新分组名（回车）" size="14">
+  <button id="btn-refresh" title="强制重扫（绕过服务端缓存）">⟳ 刷新</button>
   <button id="btn-roots">⚙ 扫描目录</button>
-  <button id="btn-show-hidden">显示已隐藏 (0)</button>
+  <button id="btn-archive-done" title="把当前筛选结果中所有已结束（非进行中）的卡片归档，可在「已归档」中恢复">归档已结束</button>
+  <button id="btn-show-hidden" title="查看/恢复已归档的卡片与组">已归档 (0)</button>
   <span class="meta" id="meta"></span>
 </div>
 <div id="roots-panel">
@@ -156,6 +179,10 @@ let hiddenGroups=loadSet("ocsr-board-hidden-groups");
 let collapsedGroups=loadSet("ocsr-board-collapsed");
 let expandedGroups=loadSet("ocsr-board-expanded");
 let showHidden=false, dragging=null, suspend=false, reqSeq=0, focusGroup="";
+function loadPref(name, fallback){
+  try{return localStorage.getItem(name)||fallback;}catch(e){return fallback;}
+}
+function savePref(name,value){try{localStorage.setItem(name,value);}catch(e){}}
 const pendingGroups=new Set();  // 会话内新建的空组，拖入首张卡片后由服务端 assignments 持久化
 const GROUP_LIMIT=6;  // 组内默认展示数（参考 opencode/Codex 的 show-more 模式）
 const $=id=>document.getElementById(id);
@@ -167,9 +194,59 @@ async function copyText(text){
   catch(e){const ta=document.createElement("textarea");ta.value=text;document.body.appendChild(ta);
     ta.select();document.execCommand("copy");ta.remove();toast("已复制");}
 }
+function fmtTime(iso){
+  if(!iso)return "—";
+  const d=new Date(iso);if(isNaN(d))return "—";
+  const p=n=>String(n).padStart(2,"0");
+  return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function failReason(w){
+  // 失败的人性化原因（对应 watcher 的终结路径；exit_0_no_artifact=进程正常退出但产物未落盘）
+  const od=w.outcome_detail||"";
+  if(od.startsWith("error:exit_0_name_mismatch"))return "产物文件名与期望不符";
+  if(od.startsWith("error:exit_0_no_artifact"))return "进程正常退出，但产物未落盘";
+  if(od.startsWith("error:exit_"))return `进程异常退出（${od.replace("error:exit_","exit=")}）`;
+  if(w.badge==="failed"&&w.exit_code!=null&&w.exit_code!==0)return `进程异常退出（exit=${w.exit_code}）`;
+  if(w.badge==="failed")return od||"失败（详见遥测）";
+  return "";
+}
+function detailDl(w){
+  return `<dl>
+    <dt>目录</dt><dd>${esc(w.dir)}</dd>
+    <dt>cwd</dt><dd>${esc(w.cwd||"—")}</dd>
+    <dt>session</dt><dd>${esc(w.session_id||"—")}</dd>
+    <dt>启动</dt><dd>${esc((w.started_at||"").replace("T"," ").slice(0,19)||"—")}</dd>
+    <dt>最后活动</dt><dd>${esc((w.last_activity||"").replace("T"," ").slice(0,19)||"—")}</dd>
+    <dt>状态</dt><dd>${esc(w.state)} · exit=${esc(w.exit_code??"—")} · 续期 ${esc(w.renewal_count??0)}</dd>
+    <dt>结果</dt><dd>${esc(w.outcome_detail||"—")} ${w.read_audit?`· 读审计 ${esc(w.read_audit)}`:""}</dd>
+    <dt>产物</dt><dd>${esc(w.artifact_bytes??"—")} B</dd>
+  </dl>`;
+}
+function sortWorkers(ws){
+  const mode=$("sort-by").value, arr=ws.slice();
+  // 无启动时间的记录始终排最后（正序用 "9999" 兜底）
+  if(mode==="started_asc")arr.sort((a,b)=>(a.started_at||"9999").localeCompare(b.started_at||"9999"));
+  else if(mode==="status")arr.sort((a,b)=>(a.badge==="active"?0:1)-(b.badge==="active"?0:1)
+    ||(b.started_at||"").localeCompare(a.started_at||""));  // 进行中优先，其余按启动时间倒序
+  else arr.sort((a,b)=>(b.started_at||"").localeCompare(a.started_at||""));  // started_desc 默认
+  return arr;
+}
+function rowView(w){
+  const reason=failReason(w);
+  return `<tr data-key="${esc(w.key)}" draggable="true">
+    <td class="l-time">${fmtTime(w.started_at)}</td>
+    <td class="l-label" title="${esc(w.key)}">${esc(w.label)}</td>
+    <td class="l-model" title="${esc(w.model)}">${esc(w.model||"?")}</td>
+    <td><span class="badge b-${w.badge}" title="${esc(reason)}">${esc(w.badge_text)}</span></td>
+    <td>${fmtDur(w)}</td>
+    <td>${esc(w.session_id?w.session_id.slice(0,14)+"…":"—")}</td>
+    <td><button data-act="sid">⧉</button> <button data-act="resume">返工</button>
+      <button data-act="detail">详情</button> <button data-act="hide">${archiveLabel(w)}</button></td>
+  </tr>${detailKeys.has(w.key)?`<tr class="detail-row"><td colspan="7">${detailDl(w)}</td></tr>`:""}`;
+}
 function fmtDur(w){
   const m=w.badge==="active"?(w.duration_min??w.wall_min):(w.wall_min??w.duration_min);
-  if(m==null)return "—";
+  if(typeof m!=="number"||!isFinite(m))return "—";  // 遥测属外部输入，非数值不渲染
   return m>=60?`${Math.floor(m/60)}h${Math.round(m%60)}m`:`${m}m`;
 }
 function timeOk(iso){
@@ -190,8 +267,9 @@ function groupOf(w){return DATA.assignments[w.key]||(w.cwd||"（未知工作目�
 function filtered(){
   const st=$("f-status").value, mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
   return DATA.workers.filter(w=>{
-    // 「显示已隐藏」只跳过隐藏判定，状态/模型/时间/关键字筛选仍然生效
-    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
+    // 主视图排除已归档；「已归档」视图只看已归档。其余筛选在两种视图下都生效
+    const archived=hidden.has(w.key)||hiddenGroups.has(groupOf(w));
+    if(showHidden?!archived:archived)return false;
     if(st!=="all"&&w.badge!==st)return false;
     if(mo!=="all"&&w.model!==mo)return false;
     if(!timeOk(workerTime(w)))return false;
@@ -205,7 +283,8 @@ function renderChips(list){
   // 与点 chip 后看到的数量一致
   const mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
   const base=DATA.workers.filter(w=>{
-    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
+    const archived=hidden.has(w.key)||hiddenGroups.has(groupOf(w));
+    if(showHidden?!archived:archived)return false;
     if(mo!=="all"&&w.model!==mo)return false;
     if(!timeOk(workerTime(w)))return false;
     if(q&&!(w.label+" "+w.session_id+" "+w.cwd+" "+w.key).toLowerCase().includes(q))return false;
@@ -225,6 +304,21 @@ function renderChips(list){
     chip("stale","◌ 滞留",c.stale,"")+
     `<span class="chip static">显示 ${list.length} / ${DATA.workers.length}</span>`;
 }
+function isArchived(w){return hidden.has(w.key)||hiddenGroups.has(groupOf(w));}
+function archiveLabel(w){return isArchived(w)?"恢复":"归档";}
+function unarchiveOne(w){
+  const g=groupOf(w);
+  if(hiddenGroups.has(g)){
+    // 组归档被单张恢复：拆成逐卡归档，避免整组被静默恢复
+    hiddenGroups.delete(g);
+    for(const x of DATA.workers)if(groupOf(x)===g&&x.key!==w.key)hidden.add(x.key);
+  }
+  hidden.delete(w.key);
+}
+function visibleWorkers(){  // 批量操作的作用域=当前可见范围（含聚焦约束）
+  const l=filtered();return focusGroup?l.filter(w=>groupOf(w)===focusGroup):l;
+}
+const detailKeys=new Set();  // 展开的详情（卡片 details 与列表 detail-row）跨轮询保持
 function card(w){
   const sid=w.session_id?`${esc(w.session_id.slice(0,14))}…`:"—";
   const dur=fmtDur(w);
@@ -233,22 +327,14 @@ function card(w){
     <div class="top"><span class="label" title="${esc(w.key)}">${esc(w.label)}</span>
       <span class="badge b-${w.badge}">${esc(w.badge_text)}</span></div>
     <div class="kv"><b>${esc(w.model||"?")}</b> · ${dur} · 尝试 ${esc(w.attempt_index??"?")}/3${w.rework_index?` · 返工 ${esc(w.rework_index)}`:""}</div>
+    ${w.badge==="failed"?`<div class="fail-reason">${esc(failReason(w))}</div>`:""}
     <div class="kv">session: ${sid} ${w.session_id?`<button data-act="sid">⧉</button>`:""}</div>
     <div class="durbar"><i style="width:${durPct}%"></i></div>
     <div class="actions">
       <button data-act="resume">复制返工命令</button>
-      <button data-act="hide">${hidden.has(w.key)?"取消隐藏":"隐藏"}</button>
+      <button data-act="hide">${archiveLabel(w)}</button>
     </div>
-    <details><summary>详情</summary><dl>
-      <dt>目录</dt><dd>${esc(w.dir)}</dd>
-      <dt>cwd</dt><dd>${esc(w.cwd||"—")}</dd>
-      <dt>session</dt><dd>${esc(w.session_id||"—")}</dd>
-      <dt>启动</dt><dd>${esc((w.started_at||"").replace("T"," ").slice(0,19)||"—")}</dd>
-      <dt>最后活动</dt><dd>${esc((w.last_activity||"").replace("T"," ").slice(0,19)||"—")}</dd>
-      <dt>状态</dt><dd>${esc(w.state)} · exit=${esc(w.exit_code??"—")} · 续期 ${esc(w.renewal_count??0)}</dd>
-      <dt>结果</dt><dd>${esc(w.outcome_detail||"—")} ${w.read_audit?`· 读审计 ${esc(w.read_audit)}`:""}</dd>
-      <dt>产物</dt><dd>${esc(w.artifact_bytes??"—")} B</dd>
-    </dl></details>
+    <details data-dt="${esc(w.key)}"${detailKeys.has(w.key)?" open":""}><summary>详情</summary>${detailDl(w)}</details>
   </div>`;
 }
 function groupSection(name,ws){
@@ -257,6 +343,9 @@ function groupSection(name,ws){
   const shown=showAll?ws:ws.slice(0,GROUP_LIMIT);
   const more=ws.length>GROUP_LIMIT
     ?`<div class="more-row"><button data-gact="${showAll?"less":"more"}" data-group="${esc(name)}">${showAll?"收起":`显示全部 ${ws.length} 张`}</button></div>`:"";
+  const body=$("view-mode").value==="list"
+    ?`<table class="wtable"><tbody>${shown.map(rowView).join("")}</tbody></table>`
+    :`<div class="cards">${shown.map(card).join("")}</div>`;
   return `<section class="group${collapsed?" collapsed":""}" data-gname="${esc(name)}">
     <div class="group-title" data-group="${esc(name)}">
       <span class="toggle" data-gact="collapse" data-group="${esc(name)}" title="折叠/展开">${collapsed?"▸":"▾"}</span>
@@ -264,9 +353,9 @@ function groupSection(name,ws){
       <span class="count">(${ws.length})</span>
       <span class="gops">
         <button data-gact="focus" data-group="${esc(name)}" title="只看此组">聚焦</button>
-        <button data-gact="hide" data-group="${esc(name)}" title="整组隐藏（视图层，不删文件）">${hiddenGroups.has(name)?"取消隐藏":"隐藏"}</button>
+        <button data-gact="hide" data-group="${esc(name)}" title="整组归档（视图层，不删证据文件）">${hiddenGroups.has(name)?"恢复":"归档"}</button>
       </span></div>
-    <div class="cards">${shown.map(card).join("")}</div>${more}</section>`;
+    ${body}${more}</section>`;
 }
 function render(){
   let list=filtered();
@@ -279,14 +368,17 @@ function render(){
   }
   let names=[...groups.keys()].sort((a,b)=>a.localeCompare(b));
   if(focusGroup)names=names.filter(n=>n===focusGroup);
+  // 归档视图：整组归档的 cwd 组即使卡片被筛掉也保留组标题（否则无法整组恢复）
+  if(showHidden)for(const g of hiddenGroups){
+    if(!names.includes(g)&&(!focusGroup||g===focusGroup))names.push(g);
+  }
   let html="";
   for(const name of names){
-    const ws=groups.get(name).sort((a,b)=>(a.badge==="active"?0:1)-(b.badge==="active"?0:1)
-      ||(b.started_at||"").localeCompare(a.started_at||""));
+    const ws=sortWorkers(groups.get(name)||[]);  // 归档组可能无卡通过筛选，仍显示组标题供整组恢复
     html+=groupSection(name,ws);
   }
   const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])]
-    .filter(g=>!groups.has(g)&&(showHidden||!hiddenGroups.has(g)));  // 隐藏的空手动组同样不渲染
+    .filter(g=>!groups.has(g)&&(showHidden?hiddenGroups.has(g):!hiddenGroups.has(g)));  // 空组随归档状态进出视图
   for(const name of manual){
     if(focusGroup&&name!==focusGroup)continue;
     html+=groupSection(name,[]);
@@ -305,7 +397,9 @@ function render(){
       <td>${esc(r.wall_min??"—")}</td><td>${esc(r.artifact_bytes??"—")}</td><td>${esc(r.read_audit||"")}</td></tr>`;
   }).join("");
   $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 5s 轮询`;
-  $("btn-show-hidden").textContent=(showHidden?"隐藏已隐藏":"显示已隐藏")+` (${hidden.size+hiddenGroups.size})`;
+  $("btn-show-hidden").textContent=(showHidden?"返回主视图":"已归档")+
+    ` (${DATA.workers.filter(w=>hidden.has(w.key)||hiddenGroups.has(groupOf(w))).length})`;  // 当前扫描结果中的归档卡片数
+  $("btn-archive-done").textContent=showHidden?"恢复当前筛选":"归档已结束";
   renderRoots();
 }
 function renderRoots(){
@@ -319,10 +413,10 @@ function renderRoots(){
   }
   $("roots-list").innerHTML=rows.join("");
 }
-async function load(){
+async function load(force){
   const seq=++reqSeq;
   try{
-    const resp=await fetch("/api/state");
+    const resp=await fetch("/api/state"+(force?"?fresh=1":""));
     const data=await resp.json();
     if(seq!==reqSeq)return;  // 只接受最新请求，防止旧响应覆盖刚保存的分组
     DATA=data;
@@ -367,24 +461,28 @@ document.addEventListener("click",async e=>{
   if(e.target.id==="btn-unfocus"){focusGroup="";render();return;}
   const btn=e.target.closest("button[data-act]");
   if(!btn)return;
-  const key=btn.closest(".card").dataset.key;
+  const key=btn.closest("[data-key]").dataset.key;
   const w=DATA.workers.find(x=>x.key===key);
   if(!w)return;
+  if(btn.dataset.act==="detail"){
+    detailKeys.has(key)?detailKeys.delete(key):detailKeys.add(key);
+    render();return;
+  }
   if(btn.dataset.act==="sid")copyText(w.session_id);
   if(btn.dataset.act==="resume")copyText(`python scripts/ocsr_dispatch.py dispatch --resume-from "${w.dir}"`);
   if(btn.dataset.act==="hide"){
-    hidden.has(key)?hidden.delete(key):hidden.add(key);
-    saveSet("ocsr-board-hidden",hidden);
+    if(isArchived(w)){unarchiveOne(w);}else{hidden.add(w.key);}
+    saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);
     render();
   }
 });
 document.addEventListener("dragstart",e=>{
-  const c=e.target.closest(".card");if(!c)return;
+  const c=e.target.closest("[data-key]");if(!c)return;
   dragging=c.dataset.key;e.dataTransfer.setData("text/plain",dragging);
 });
 document.addEventListener("dragend",()=>{dragging=null;suspend=false;});
 // 指针按下卡片起暂停轮询重渲染，避免 mousedown→dragstart 窗口期 DOM 重建换牌
-document.addEventListener("pointerdown",e=>{if(e.target.closest(".card"))suspend=true;});
+document.addEventListener("pointerdown",e=>{if(e.target.closest("[data-key]"))suspend=true;});
 document.addEventListener("pointerup",()=>{suspend=false;});
 document.addEventListener("pointercancel",()=>{suspend=false;});
 document.addEventListener("dragover",e=>{
@@ -428,8 +526,41 @@ $("btn-root-add").addEventListener("click",async()=>{
   }catch(err){toast("添加失败");}
 });
 $("btn-show-hidden").addEventListener("click",()=>{showHidden=!showHidden;render();});
+$("btn-archive-done").addEventListener("click",()=>{
+  if(showHidden){
+    // 归档视图：批量恢复当前可见范围（含聚焦约束）内的归档卡片
+    const list=visibleWorkers();
+    if(!list.length){toast("当前筛选下没有已归档卡片");return;}
+    for(const w of list)unarchiveOne(w);  // 组归档拆逐卡，目标卡恢复，其余保持归档
+    saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);
+    render();toast(`已恢复 ${list.length} 张`);return;
+  }
+  const done=visibleWorkers().filter(w=>w.badge!=="active"&&!isArchived(w));
+  if(!done.length){toast("当前筛选下没有可归档的已结束卡片");return;}
+  for(const w of done)hidden.add(w.key);
+  saveSet("ocsr-board-hidden",hidden);
+  render();toast(`已归档 ${done.length} 张，点「已归档」可查看或恢复`);
+});
+// 卡片 <details> 的展开状态跨轮询保持（toggle 不冒泡，用捕获）
+document.addEventListener("toggle",e=>{
+  if(e.target.tagName!=="DETAILS")return;
+  const host=e.target.closest("[data-key]");if(!host)return;
+  e.target.open?detailKeys.add(host.dataset.key):detailKeys.delete(host.dataset.key);
+},true);
 for(const id of["f-status","f-model","f-q","f-time"])$(id).addEventListener("input",render);
-load();setInterval(load,5000);
+$("sort-by").addEventListener("input",()=>{savePref("ocsr-board-sort",$("sort-by").value);render();});
+$("view-mode").addEventListener("input",()=>{savePref("ocsr-board-view",$("view-mode").value);render();});
+$("sort-by").value=loadPref("ocsr-board-sort","started_desc");
+$("view-mode").value=loadPref("ocsr-board-view","cards");
+$("btn-refresh").addEventListener("click",()=>load(true));
+// 自适应轮询：有进行中的 worker 时 5s，否则 15s；服务端另有 10s 扫描缓存
+let pollMs=5000;
+async function poll(){
+  await load();
+  pollMs=DATA.workers.some(w=>w.badge==="active")?5000:15000;
+  setTimeout(poll,pollMs);
+}
+poll();
 </script>
 </body>
 </html>
