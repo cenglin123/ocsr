@@ -1,6 +1,27 @@
 {
   "name": "@ocsr/dsh-ocsr",
   "version": "0.2.0",
+  "description": "An ocsr skill and an ocsr_dispatch tool that run headless opencode run as fresh-context, cross-vendor worker backends.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "opencode",
+    "subagents",
+    "dispatch"
+  ],
+  "homepage": "https://github.com/cenglin123/ocsr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cenglin123/ocsr.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cenglin123/ocsr/issues"
+  },
+  "author": "cenglin123",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
