@@ -25,6 +25,14 @@ python scripts/verify_ocsr_skill.py
 - 本地运行：[docs/deployment.md](docs/deployment.md)
 - 已知陷阱：[docs/pitfalls.md](docs/pitfalls.md)
 
+## 只读面板
+
+```powershell
+python scripts/ocsr_board.py   # 127.0.0.1:8787，自动开浏览器
+```
+
+本地面板展示各派发 worker 的状态、时长、session ID，支持按工作目录分组、拖动分组与筛选；只读既有证据文件，不参与派发机制。详见 [docs/deployment.md](docs/deployment.md)。
+
 ## 验证
 
 ```powershell

@@ -56,6 +56,17 @@ python -m pytest tests/test_dsh_adapter.py -q
 
 `python -m pytest tests/ -q` 已包含 pytest 桥 `tests/test_dsh_adapter.py`：它枚举 `tests/adapter/*.test.mjs` 并逐个传给 node；本机找不到 0.2.2 运行时或 Node 时整组 skip，不视为失败（设 `OCSR_REQUIRE_ADAPTER_TESTS=1` 则改为失败）。适配契约见 [../refs/dsh-integration.md](../refs/dsh-integration.md)。
 
+## 只读面板
+
+```powershell
+python scripts/ocsr_board.py            # 默认 127.0.0.1:8787，自动开浏览器
+python scripts/ocsr_board.py --days 30  # 扩大派发目录扫描窗口（默认 7 天；0=全部）
+```
+
+面板是纯只读观察者：扫描 `%TEMP%\ocsr_dispatch_*/<label>/`（worker-state、session-binding、start.marker）与 `~/.ocsr/dispatch-log.jsonl`，不改派发、看门狗或遥测链路；唯一可写文件是面板私有的 `~/.ocsr/board-groups.json`（手动分组）。支持按 cwd 默认分组、拖动手动分组、状态/模型/关键字筛选、session ID 与返工命令复制；隐藏记录仅作用于浏览器视图。运行状态以 watcher 落盘证据为准：越过 `total_deadline` 或进程已退出但未验收的条目显示为灰色「滞留」，不冒充进行中。
+
+端口：8787 被旧面板实例占用时自动 KILL 旧实例后同端口重启（经 `/api/identity` 识别）；被其他程序占用时依次探测 8788..8797。Windows 上禁用 `SO_REUSEADDR`（它会允许强行绑定已占用端口，使占用探测失效）。
+
 ## Git hook
 
 仓库使用 `.githooks/pre-commit` 检查 OCSR 回归脚本并在检测到治理文档变更时输出独立复查提醒。`core.hooksPath` 应指向 `.githooks`。
