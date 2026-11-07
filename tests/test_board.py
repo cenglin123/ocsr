@@ -198,6 +198,63 @@ class GroupsTest(unittest.TestCase):
             self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
             self.assertNotIn(b"\r", raw)
 
+    def test_assignment_preserves_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board-groups.json"
+            extra = Path(tmp) / "elsewhere"
+            extra.mkdir()
+            board.mutate_roots("add", str(extra), Path(tmp), path)
+            board.save_assignment("k1", "组", path)
+            config = board.load_config(path)
+            self.assertEqual([str(extra.resolve())], config["roots"])
+            self.assertEqual({"k1": "组"}, config["assignments"])
+
+    def test_legacy_config_without_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board-groups.json"
+            path.write_text('{"assignments": {"a": "b"}}', encoding="utf-8")
+            self.assertEqual([], board.load_config(path)["roots"])
+            self.assertEqual({"a": "b"}, board.load_assignments(path))
+
+
+class RootsTest(unittest.TestCase):
+    def test_add_and_remove(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            base.mkdir()
+            extra = Path(tmp) / "extra"
+            extra.mkdir()
+            path = Path(tmp) / "cfg.json"
+            roots, err = board.mutate_roots("add", str(extra), base, path)
+            self.assertEqual("", err)
+            self.assertEqual([str(extra.resolve())], roots)
+            # 重复添加 / 不存在路径 / 默认根 / 相对路径均拒绝
+            self.assertTrue(board.mutate_roots("add", str(extra), base, path)[1])
+            self.assertTrue(board.mutate_roots("add", str(Path(tmp) / "nope"), base, path)[1])
+            self.assertTrue(board.mutate_roots("add", str(base), base, path)[1])
+            self.assertTrue(board.mutate_roots("add", "relative\\x", base, path)[1])
+            # 移除默认根或不在配置中的目录均拒绝
+            self.assertTrue(board.mutate_roots("remove", str(base), base, path)[1])
+            roots, err = board.mutate_roots("remove", str(extra), base, path)
+            self.assertEqual("", err)
+            self.assertEqual([], roots)
+
+    def test_effective_roots_skip_missing_and_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            base.mkdir()
+            extra = Path(tmp) / "extra"
+            extra.mkdir()
+            path = Path(tmp) / "cfg.json"
+            board.mutate_roots("add", str(extra), base, path)
+            board.mutate_roots("add", str(extra), base, path)  # 重复被拒绝
+            cfg = board.load_config(path)
+            cfg["roots"].append(str(Path(tmp) / "gone"))  # 已不存在的根被跳过
+            board._write_config(cfg, path)
+            roots = board.effective_roots(base, path)
+            self.assertEqual([str(base.resolve()), str(extra.resolve())],
+                             [str(r.resolve()) for r in roots])
+
 
 class ValidationTest(unittest.TestCase):
     def test_group_payload(self):

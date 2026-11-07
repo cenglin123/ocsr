@@ -267,26 +267,86 @@ def attach_telemetry(workers: list[dict[str, Any]], history: list[dict[str, Any]
 # 手动分组（面板私有文件，不触碰 OCSR 证据）
 # ---------------------------------------------------------------------------
 
-def load_assignments(path: Path = GROUPS_PATH) -> dict[str, str]:
+def load_config(path: Path = GROUPS_PATH) -> dict[str, Any]:
     data = _load_json(path)
-    raw = data.get("assignments")
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): str(v) for k, v in raw.items() if isinstance(v, str)}
+    assignments = data.get("assignments")
+    if not isinstance(assignments, dict):
+        assignments = {}
+    assignments = {str(k): str(v) for k, v in assignments.items() if isinstance(v, str)}
+    roots = data.get("roots")
+    if not isinstance(roots, list):
+        roots = []
+    roots = [r for r in roots if isinstance(r, str) and r]
+    return {"assignments": assignments, "roots": roots}
+
+
+def load_assignments(path: Path = GROUPS_PATH) -> dict[str, str]:
+    return load_config(path)["assignments"]
+
+
+def _write_config(config: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(config, ensure_ascii=False, indent=1) + "\n",
+                   encoding="utf-8", newline="\n")
+    os.replace(tmp, path)
 
 
 def save_assignment(key: str, group: str, path: Path = GROUPS_PATH) -> dict[str, str]:
-    assignments = load_assignments(path)
+    config = load_config(path)
+    assignments = config["assignments"]
     if group:
         assignments[key] = group
     else:
         assignments.pop(key, None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"assignments": assignments}, ensure_ascii=False, indent=1) + "\n",
-                   encoding="utf-8", newline="\n")
-    os.replace(tmp, path)
+    _write_config(config, path)
     return assignments
+
+
+def effective_roots(base: Path, path: Path = GROUPS_PATH,
+                    extra: list[Path] | None = None) -> list[Path]:
+    """默认 TEMP + CLI --work-dir + 配置里额外添加且仍存在的扫描根（去重，保持顺序）。"""
+    base_resolved = str(base.resolve())
+    roots = [base]
+    seen = {base_resolved}
+    for p in list(extra or []) + [Path(r) for r in load_config(path)["roots"]]:
+        try:
+            resolved = str(p.resolve())
+            if p.is_dir() and resolved not in seen:
+                roots.append(p)
+                seen.add(resolved)
+        except OSError:
+            continue
+    return roots
+
+
+def mutate_roots(action: str, raw_path: Any, base: Path,
+                 path: Path = GROUPS_PATH) -> tuple[list[str], str]:
+    """增删额外扫描根。返回 (roots, 错误信息)；错误非空即失败。"""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return [], "路径为空或类型错误"
+    if any(ord(c) < 32 for c in raw_path) or len(raw_path) > 512:
+        return [], "路径含控制字符或超长"
+    p = Path(raw_path.strip())
+    config = load_config(path)
+    roots = config["roots"]
+    if action == "add":
+        if not p.is_absolute() or not p.is_dir():
+            return [], "必须是存在的绝对路径目录"
+        resolved = str(p.resolve())
+        if resolved == str(base.resolve()):
+            return [], "该目录已是默认扫描根"
+        if resolved in roots:
+            return [], "该目录已在列表中"
+        roots.append(resolved)
+    elif action == "remove":
+        if raw_path.strip() not in roots:
+            return [], "只能移除额外添加的扫描根"
+        roots.remove(raw_path.strip())
+    else:
+        return [], "未知 action"
+    _write_config(config, path)
+    return roots, ""
 
 
 def default_group(worker: dict[str, Any]) -> str:
@@ -409,7 +469,8 @@ class BoardHandler(BaseHTTPRequestHandler):
     server_version = "OCSRBoard/1"
     started_at = time.time()
     days = 7
-    temp_roots: list[Path] = [Path(tempfile.gettempdir())]
+    base_root = Path(tempfile.gettempdir())
+    cli_roots: list[Path] = []
     log_path = DISPATCH_LOG
     groups_path = GROUPS_PATH
 
@@ -443,8 +504,10 @@ class BoardHandler(BaseHTTPRequestHandler):
                         "port": self.server.server_address[1],
                         "started_at": self.started_at})
         elif path == "/api/state":
+            roots = effective_roots(self.base_root, self.groups_path, self.cli_roots)
+            custom = load_config(self.groups_path)["roots"]
             workers: list[dict[str, Any]] = []
-            for root in self.temp_roots:
+            for root in roots:
                 workers.extend(scan_workers(root, self.days))
             history = read_history(self.log_path)
             attach_telemetry(workers, history)
@@ -453,6 +516,9 @@ class BoardHandler(BaseHTTPRequestHandler):
                 "workers": workers,
                 "history": history,
                 "assignments": load_assignments(self.groups_path),
+                "roots": [{"path": str(r), "kind": "default" if r == self.base_root
+                           else ("cli" if r in self.cli_roots else "custom")}
+                          for r in roots],
                 "generated_at": datetime.now().astimezone().isoformat(),
                 "dir_count": len(dir_labels),
             })
@@ -469,13 +535,28 @@ class BoardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._origin_ok():
             return
-        if self.path != "/api/groups":
-            self._json({"error": "not found"}, 404)
-            return
         # 只接受 application/json（非 simple request，跨源浏览器表单无法伪造）
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype != "application/json":
             self._json({"error": "unsupported content type"}, 415)
+            return
+        if self.path == "/api/roots":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(min(length, 65536)).decode("utf-8"))
+            except (ValueError, json.JSONDecodeError):
+                self._json({"error": "bad request"}, 400)
+                return
+            roots, err = mutate_roots(str(data.get("action", "")) if isinstance(data, dict) else "",
+                                      data.get("path") if isinstance(data, dict) else None,
+                                      self.base_root, self.groups_path)
+            if err:
+                self._json({"error": err}, 400)
+                return
+            self._json({"roots": roots})
+            return
+        if self.path != "/api/groups":
+            self._json({"error": "not found"}, 404)
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -501,7 +582,7 @@ def main() -> int:
 
     BoardHandler.days = args.days
     if args.work_dir:
-        BoardHandler.temp_roots = [Path(d) for d in args.work_dir]
+        BoardHandler.cli_roots = [Path(d) for d in args.work_dir]
 
     # 探测与正式 bind 之间端口可能被抢占：bind 失败时重走 ensure_port（自动换端口/重启判断）
     server = None
