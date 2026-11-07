@@ -31,7 +31,18 @@
 
 #### 迁移影响
 - 无行为变更；安装方式与版本门不受影响。
-- 发布 npm 包需要 npm 凭据与 `@ocsr` scope（未发布前市场只展示 GitHub 安装方式）。
+- npm 元数据在 0.2.1 起随包发布；`assets/` 与 `screenshots.json` 只留在 GitHub，不打进 npm 包。
+
+### 发布 npm 包：包名改为 `dsh-ocsr`
+
+#### 变更内容
+- 包名从 `@ocsr/dsh-ocsr` 改为无 scope 的 **`dsh-ocsr`**，版本 0.2.1：发到 npm 不需要额外的组织/scope 权限，`dsh plugin add dsh-ocsr` 即可安装。
+- `cordis.patch.yml` 两个 entry 的 `name` 同步改为 `dsh-ocsr` 与 `dsh-ocsr/tool`；`lib/*.js` 的 `@module` 文档标签、`refs/dsh-integration.md` 的安装/发布说明、`docs/CURRENT.md` 与 `assets/screenshot-3-composition.png` 同步更新。
+- npm 元数据（description/keywords/homepage/repository/bugs/author/`publishConfig.access: public`）随 0.2.1 发布；`repository` 指回本仓库，供插件市场自动关联包与仓库。
+
+#### 迁移影响
+- 以 `link:`/GitHub 源安装过旧包的 profile：bundle 名由 `@ocsr/dsh-ocsr` 变为 `dsh-ocsr`，需 `dsh plugin --profile <p> remove <旧名>` 后重新 `add`；0.2.0 未发布到 npm，不存在 npm 侧破坏性升级。
+- 安装命令统一为 `dsh plugin --profile <p> add dsh-ocsr`（npm）或 `add github:cenglin123/ocsr`（GitHub 源）。
 
 ## 2026-11-02
 
