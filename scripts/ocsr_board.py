@@ -46,8 +46,9 @@ DIR_NAME_RE = re.compile(r"^ocsr_dispatch_(\d{8})_(\d{6})_[0-9a-f]+$")
 MODEL_RE = re.compile(r"\s-m\s+([\w./-]+)")
 EXIT_RE = re.compile(r"^exit=(\d+)$")
 
-# worker-state.json 的 state 值域（见 ocsr_dispatch.py 写入点）
-ACTIVE_STATES = {"launched", "inspection_due", "renewed", "reported"}
+# worker-state.json 的显式终态（见 ocsr_dispatch.py 写入点）；
+# 其余值（launched/running/inspection_due/renewed/reported/terminating/unknown 等）
+# 一律按活动态处理，再由退出码与 total_deadline 推导是否为滞留。
 BADGE_BY_STATE = {
     "landed": ("landed", "✓ 已落盘"),
     "timed_out": ("timeout", "⚠ 超时"),
@@ -231,40 +232,52 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
 
 
+def _ts_key(rec: dict[str, Any]) -> float:
+    dt = _parse_iso(rec.get("ts"))
+    return dt.timestamp() if dt else 0.0
+
+
 def attach_telemetry(workers: list[dict[str, Any]], history: list[dict[str, Any]]) -> None:
-    """补全 wall_min/产物等；同 label 多次运行时，取「不早于该 worker 启动的
-    最早一条」遥测（同 label 串行运行：本次运行完成时间早于下一次启动，
-    取最新一条会串到别的运行）。遥测明确的 error/timeout 终态校正徽章。"""
+    """补全 wall_min/产物等。同 label 可能串行多次运行、且一次运行可能写多条
+    遥测（hierarchical_report 先写 reported 中间行、后写终态行）。规则：
+    在「不早于该 worker 启动」的候选中取最早一条**终态行**（非 reported:），
+    既不串到下一次运行，也不把中间行的检查时刻时长/log 大小当成最终值。
+    无终态行则不绑定（保留目录证据原样）。遥测 error/timeout 校正徽章。"""
     by_label: dict[str, list[dict[str, Any]]] = {}
     for rec in history:
         by_label.setdefault(rec.get("label", ""), []).append(rec)
     for recs in by_label.values():
-        recs.sort(key=lambda r: r.get("ts", ""))
+        recs.sort(key=_ts_key)
     for w in workers:
         cands = by_label.get(w["label"], [])
         if not cands:
             continue
         started = _parse_iso(w.get("started_at"))
+        started_ts = started.timestamp() if started else None
         best = None
         for rec in cands:
-            ts = _parse_iso(rec.get("ts"))
-            if started is not None and ts is not None and ts < started:
+            ts = _ts_key(rec)
+            if started_ts is not None and ts < started_ts:
                 continue  # 属于更早的运行
+            od = rec.get("outcome_detail")
+            if isinstance(od, str) and od.startswith("reported:"):
+                continue  # 中间行，不是本次运行的最终状态
             best = rec
             break
         if best is None:
             continue
+        od = best.get("outcome_detail")
         w["wall_min"] = best.get("wall_min")
         w["artifact_bytes"] = best.get("artifact_bytes")
-        w["outcome_detail"] = best.get("outcome_detail", "")
-        w["read_audit"] = best.get("read_audit", "")
-        od = w["outcome_detail"]
+        w["outcome_detail"] = od if isinstance(od, str) else ""
+        read_audit = best.get("read_audit", "")
+        w["read_audit"] = read_audit if isinstance(read_audit, str) else ""
         # exit_0_no_artifact 等失败只存在于遥测（worker-state 无 failed 值域），
         # 据此校正；watcher 显式终态（landed/stopped/timed_out）不动。
         if w["badge"] in ("active", "stale"):
-            if od.startswith("error"):
+            if w["outcome_detail"].startswith("error"):
                 w["badge"], w["badge_text"] = "failed", "✕ 失败"
-            elif od.startswith("timeout"):
+            elif w["outcome_detail"].startswith("timeout"):
                 w["badge"], w["badge_text"] = "timeout", "⚠ 超时"
         if w["badge"] == "active" and w["duration_min"] is None:
             w["duration_min"] = w["wall_min"]
@@ -297,7 +310,10 @@ def _write_config(config: dict[str, Any], path: Path) -> None:
     tmp.write_text(json.dumps(config, ensure_ascii=False, indent=1) + "\n",
                    encoding="utf-8", newline="\n")
     os.replace(tmp, path)
-    _STATE_CACHE["at"] = 0.0  # 配置变更立即使扫描缓存失效（分组/根改动下次请求即可见）
+    # 配置变更立即使缓存失效并递增代次；build_state 回填前核对代次，防止
+    # 扫描期间发生的配置写被旧扫描结果覆盖回缓存
+    _STATE_CACHE["at"] = 0.0
+    _STATE_CACHE["gen"] += 1
 
 
 # ThreadingHTTPServer 下两个写端点共用此锁，保护配置的读-改-写与固定 tmp 文件名
@@ -305,7 +321,7 @@ _CONFIG_LOCK = threading.Lock()
 
 # /api/state 扫描缓存：Windows + Defender 下单次全量扫描需秒级，
 # 多客户端轮询共享 TTL 内的缓存，避免每个请求都全量重扫拖满 CPU。
-_STATE_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
+_STATE_CACHE: dict[str, Any] = {"at": 0.0, "payload": None, "gen": 0}
 _STATE_CACHE_TTL = 10.0  # 秒
 _STATE_LOCK = threading.Lock()  # 扫描互斥（与配置写锁分离）
 
@@ -390,11 +406,29 @@ def probe_board_identity(port: int, host: str = "127.0.0.1", timeout: float = 1.
 
 
 def kill_pid(pid: int) -> None:
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                       capture_output=True, timeout=15)
-    else:
-        os.kill(pid, 15)
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, timeout=15)
+        else:
+            os.kill(pid, 15)
+    except (OSError, subprocess.SubprocessError):
+        pass  # 目标可能已退出；由后续 bind 结果判定端口是否释放
+
+
+def verify_board_process(pid: int) -> bool:
+    """KILL 前二次核对目标进程命令行确为 ocsr_board.py（防伪 identity 误杀）。"""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"],
+                capture_output=True, text=True, timeout=10)
+            return "ocsr_board.py" in (out.stdout or "")
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+        return "ocsr_board.py" in cmdline
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _bind(host: str, port: int) -> socket.socket:
@@ -410,7 +444,8 @@ def _bind(host: str, port: int) -> socket.socket:
 
 def ensure_port(host: str = "127.0.0.1", port: int = DEFAULT_PORT,
                 prober=probe_board_identity, killer=kill_pid,
-                bind=_bind, sleep=time.sleep) -> tuple[int, str]:
+                bind=_bind, sleep=time.sleep,
+                verifier=verify_board_process) -> tuple[int, str]:
     """返回 (实际端口, 动作)。动作 ∈ fresh / restarted / moved。
 
     端口被旧 ocsr_board 占用 → KILL 旧实例后复用同端口（restarted）；
@@ -423,7 +458,7 @@ def ensure_port(host: str = "127.0.0.1", port: int = DEFAULT_PORT,
         pass
 
     identity = prober(port, host)
-    if identity:
+    if identity and verifier(identity["pid"]):
         killer(identity["pid"])
         for _ in range(24):  # 最多等 ~6s 让端口释放
             sleep(0.25)
@@ -448,39 +483,48 @@ def ensure_port(host: str = "127.0.0.1", port: int = DEFAULT_PORT,
 # ---------------------------------------------------------------------------
 
 def build_state(handler: "BoardHandler", force: bool = False) -> dict[str, Any]:
-    """/api/state 的数据构建，带 TTL 缓存（fresh=1 强制重扫并刷新缓存）。"""
+    """/api/state 的数据构建，带 TTL 缓存（fresh=1 强制重扫并刷新缓存）。
+
+    代次防护：扫描期间若发生配置写（gen 递增），放弃本次回填并重扫，
+    避免旧配置的扫描结果覆盖写后缓存。
+    """
     with _STATE_LOCK:
         if not force and _STATE_CACHE["payload"] is not None \
                 and time.monotonic() - _STATE_CACHE["at"] < _STATE_CACHE_TTL:
             return _STATE_CACHE["payload"]
-        cfg = load_config(handler.groups_path)
-        custom = cfg["roots"]
-        roots = effective_roots(handler.base_root, handler.groups_path, handler.cli_roots)
-        workers: list[dict[str, Any]] = []
-        for root in roots:
-            workers.extend(scan_workers(root, handler.days))
-        history = read_history(handler.log_path)
-        attach_telemetry(workers, history)
-        payload = {
-            "workers": workers,
-            "history": history,
-            "assignments": cfg["assignments"],
-            "roots": [{"path": str(r), "kind": "default" if r == handler.base_root
-                       else ("cli" if r in handler.cli_roots else "custom")}
-                      for r in roots],
-            # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
-            "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
-            "generated_at": datetime.now().astimezone().isoformat(),
-            "dir_count": len({w["key"] for w in workers}),
-            "cache_ttl": _STATE_CACHE_TTL,
-        }
-        _STATE_CACHE.update(at=time.monotonic(), payload=payload)
-        return payload
+        for _ in range(2):
+            gen_before = _STATE_CACHE["gen"]
+            cfg = load_config(handler.groups_path)
+            custom = cfg["roots"]
+            roots = effective_roots(handler.base_root, handler.groups_path, handler.cli_roots)
+            workers: list[dict[str, Any]] = []
+            for root in roots:
+                workers.extend(scan_workers(root, handler.days))
+            history = read_history(handler.log_path)
+            attach_telemetry(workers, history)
+            payload = {
+                "workers": workers,
+                "history": history,
+                "assignments": cfg["assignments"],
+                "roots": [{"path": str(r), "kind": "default" if r == handler.base_root
+                           else ("cli" if r in handler.cli_roots else "custom")}
+                          for r in roots],
+                # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
+                "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
+                "generated_at": datetime.now().astimezone().isoformat(),
+                "dir_count": len({w["key"] for w in workers}),
+                "cache_ttl": _STATE_CACHE_TTL,
+            }
+            if _STATE_CACHE["gen"] == gen_before:
+                _STATE_CACHE.update(at=time.monotonic(), payload=payload)
+                return payload
+        return payload  # 极端连续写入：直接返回最新扫描，不写缓存
 
 
 class BoardServer(ThreadingHTTPServer):
-    # Windows 上 allow_reuse_address 会让 bind 在端口被占用时也成功，必须禁用。
-    allow_reuse_address = False
+    # Windows 禁用 reuse（它会允许强行绑定已占用端口，使占用探测失效）；
+    # POSIX 保留 reuse，避免旧实例 TIME_WAIT 连接导致同端口重启失败。
+    allow_reuse_address = os.name != "nt"
     daemon_threads = True
 
 

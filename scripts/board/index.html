@@ -205,7 +205,8 @@ function failReason(w){
   const od=w.outcome_detail||"";
   if(od.startsWith("error:exit_0_name_mismatch"))return "产物文件名与期望不符";
   if(od.startsWith("error:exit_0_no_artifact"))return "进程正常退出，但产物未落盘";
-  if(od.startsWith("error:exit_"))return `进程异常退出（${od.replace("error:exit_","exit=")}）`;
+  if(od.startsWith("error:exit_code_"))return `进程异常退出（exit=${od.slice("error:exit_code_".length)}）`;
+  if(od.startsWith("error:exit_"))return od;
   if(w.badge==="failed"&&w.exit_code!=null&&w.exit_code!==0)return `进程异常退出（exit=${w.exit_code}）`;
   if(w.badge==="failed")return od||"失败（详见遥测）";
   return "";
@@ -353,7 +354,9 @@ function groupSection(name,ws){
       <span class="count">(${ws.length})</span>
       <span class="gops">
         <button data-gact="focus" data-group="${esc(name)}" title="只看此组">聚焦</button>
-        <button data-gact="hide" data-group="${esc(name)}" title="整组归档（视图层，不删证据文件）">${hiddenGroups.has(name)?"恢复":"归档"}</button>
+        <button data-gact="hide" data-group="${esc(name)}" title="整组归档（含该目录后续新派发；可在已归档中恢复）">${hiddenGroups.has(name)?"恢复":"归档"}</button>
+        ${(Object.values(DATA.assignments).includes(name)||pendingGroups.has(name))&&ws.length===0
+          ?`<button data-gact="delgroup" data-group="${esc(name)}" title="删除空组（清除其全部分配）">删除</button>`:""}
       </span></div>
     ${body}${more}</section>`;
 }
@@ -396,9 +399,10 @@ function render(){
       <td>${esc(r.model)}</td><td class="${oc}">${esc(r.outcome)}</td>
       <td>${esc(r.wall_min??"—")}</td><td>${esc(r.artifact_bytes??"—")}</td><td>${esc(r.read_audit||"")}</td></tr>`;
   }).join("");
-  $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 5s 轮询`;
-  $("btn-show-hidden").textContent=(showHidden?"返回主视图":"已归档")+
-    ` (${DATA.workers.filter(w=>hidden.has(w.key)||hiddenGroups.has(groupOf(w))).length})`;  // 当前扫描结果中的归档卡片数
+  $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 轮询 ${pollMs/1000}s`;
+  // 归档计数与「已归档」视图同一筛选口径（主视图时预览切过去将看到的数量）
+  const savedShow=showHidden;showHidden=true;const archivedList=filtered();showHidden=savedShow;
+  $("btn-show-hidden").textContent=(showHidden?"返回主视图":"已归档")+` (${archivedList.length})`;
   $("btn-archive-done").textContent=showHidden?"恢复当前筛选":"归档已结束";
   renderRoots();
 }
@@ -436,6 +440,19 @@ document.addEventListener("click",async e=>{
   const gbtn=e.target.closest("[data-gact]");
   if(gbtn){
     const g=gbtn.dataset.group, act=gbtn.dataset.gact;
+    if(act==="delgroup"){
+      // 删除空手动组：清除指向该组的全部 assignment，并移除会话内空组
+      const keys=Object.keys(DATA.assignments).filter(k=>DATA.assignments[k]===g);
+      try{
+        for(const k of keys){
+          await fetch("/api/groups",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({key:k,group:""})});
+        }
+        pendingGroups.delete(g);
+        load();toast(`已删除空组「${g}」`);
+      }catch(err){toast("删除失败");}
+      return;
+    }
     if(act==="collapse"){collapsedGroups.has(g)?collapsedGroups.delete(g):collapsedGroups.add(g);
       saveSet("ocsr-board-collapsed",collapsedGroups);render();}
     if(act==="focus"){focusGroup=focusGroup===g?"":g;render();}
@@ -501,7 +518,9 @@ document.addEventListener("drop",async e=>{
   try{
     const resp=await fetch("/api/groups",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({key,group:target})});
-    const data=await resp.json();DATA.assignments=data.assignments||{};
+    const data=await resp.json();
+    if(!resp.ok){toast(data.error||"分组保存失败");return;}
+    DATA.assignments=data.assignments||{};
     pendingGroups.add(target);
     render();toast(`已归入「${target}」`);
     load();  // 以最新序号拉取，消除与在途轮询的覆盖竞态

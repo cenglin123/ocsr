@@ -187,6 +187,53 @@ class HistoryTest(unittest.TestCase):
             board.attach_telemetry(workers, hist)
             self.assertEqual("failed", workers[0]["badge"])
 
+    def test_single_run_reported_then_final_prefers_final(self):
+        # 一次运行写多条遥测：reported 中间行（log 大小/检查时刻时长）不得当最终值
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime.now().astimezone()
+            make_dispatch(root, captured_at=(now - timedelta(hours=1)).timestamp())
+            workers = board.scan_workers(root, days=0)
+            hist = [
+                {"label": "w1", "ts": (now - timedelta(minutes=30)).isoformat(),
+                 "outcome_detail": "reported:running", "wall_min": 30.0,
+                 "artifact_bytes": 999999},  # 中间行：log 大小而非产物
+                {"label": "w1", "ts": (now - timedelta(minutes=10)).isoformat(),
+                 "outcome_detail": "success:completed", "wall_min": 50.0,
+                 "artifact_bytes": 4321, "read_audit": "clean"},
+            ]
+            board.attach_telemetry(workers, hist)
+            self.assertEqual(50.0, workers[0]["wall_min"])
+            self.assertEqual(4321, workers[0]["artifact_bytes"])
+            self.assertEqual("clean", workers[0]["read_audit"])
+
+    def test_only_reported_rows_do_not_bind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime.now().astimezone()
+            make_dispatch(root, captured_at=(now - timedelta(hours=1)).timestamp())
+            workers = board.scan_workers(root, days=0)
+            hist = [{"label": "w1", "ts": now.isoformat(),
+                     "outcome_detail": "reported:running", "wall_min": 30.0,
+                     "artifact_bytes": 999999}]
+            board.attach_telemetry(workers, hist)
+            self.assertIsNone(workers[0]["wall_min"])
+            self.assertIsNone(workers[0]["artifact_bytes"])
+
+    def test_malformed_telemetry_fields_tolerated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_dispatch(root)
+            workers = board.scan_workers(root, days=0)
+            hist = [
+                {"label": "w1", "ts": 12345, "outcome_detail": None},  # 非字符串 ts/od
+                {"label": "w1", "ts": "not-a-date", "outcome_detail": {"x": 1}},
+                {"label": "w1", "ts": datetime.now().astimezone().isoformat(),
+                 "outcome_detail": "success:completed", "wall_min": 7.0},
+            ]
+            board.attach_telemetry(workers, hist)  # 不应抛 TypeError/AttributeError
+            self.assertEqual(7.0, workers[0]["wall_min"])
+
     def test_landed_not_overridden_by_telemetry_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -324,6 +371,7 @@ class PortTest(unittest.TestCase):
                 bind=lambda h, p: (_ for _ in ()).throw(OSError())
                 if p == port and not killed else None,
                 sleep=lambda s: None,
+                verifier=lambda pid: True,
             )
         finally:
             holder.close()
@@ -455,6 +503,37 @@ class StateCacheTest(unittest.TestCase):
             self.assertEqual(0.0, board._STATE_CACHE["at"])  # 配置写使缓存失效
             p3 = board.build_state(H)
             self.assertEqual({"k": "g"}, p3["assignments"])
+
+
+    def test_generation_retry_when_config_written_during_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            class H:
+                groups_path = root / "cfg.json"
+                base_root = root / "base"
+                cli_roots: list = []
+                days = 0
+                log_path = root / "log.jsonl"
+
+            H.base_root.mkdir()
+            calls = {"n": 0}
+            real_scan = board.scan_workers
+
+            def scan_and_write(r, days):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    # 模拟扫描期间发生配置写：gen 递增，应触发重扫而非旧值回填
+                    board.save_assignment("late", "组", H.groups_path)
+                return []
+
+            board.scan_workers = scan_and_write
+            try:
+                payload = board.build_state(H)
+            finally:
+                board.scan_workers = real_scan
+            self.assertGreaterEqual(calls["n"], 2)
+            self.assertEqual({"late": "组"}, payload["assignments"])
 
 
 if __name__ == "__main__":

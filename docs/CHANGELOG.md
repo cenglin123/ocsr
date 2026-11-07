@@ -2,6 +2,19 @@
 
 ## 2026-11-08
 
+### Board 整体终审修复：遥测归属、缓存代次与分组生命周期
+
+#### 变更内容
+- 遥测归属修正：一次运行可写多条遥测（hierarchical_report 先写 reported 中间行再写终态行），绑定规则改为「启动后最早一条**终态行**（非 reported:）」，中间行的检查时刻时长与 log 大小不再被当成最终时长/产物字节；无终态行则不绑定。读取侧对非字符串 ts/outcome_detail 等外部输入做类型容错，不再因单条坏行导致 /api/state 500。
+- 缓存正确性：_STATE_CACHE 增加代次 gen，扫描期间发生配置写则放弃回填并重扫，修复「配置写入立即使缓存失效」在并发下被旧扫描结果覆盖的竞态。
+- 失败原因映射修正为 dispatcher 实际的 error:exit_code_N 形式（此前 error:exit_ 分支产生 exit=code_N 错位文案）。
+- 分组生命周期：拖放保存检查 resp.ok（400 不再清空视图或假提示）；空手动组可在组标题「删除」清除分配；文档明确整组归档按工作目录持续生效（含后续新派发）。
+- 其它：meta 轮询间隔动态显示；归档计数与已归档视图同一筛选口径；ACTIVE_STATES 死常量移除；POSIX 保留 allow_reuse_address（避免 TIME_WAIT 重启失败，Windows 仍禁用）；kill_pid 异常容忍；KILL 前二次核对目标进程命令行确为 ocsr_board.py（verify_board_process，防伪 identity 误杀）。
+- 35 项面板离线测试（新增单次多行遥测归属、类型容错、代次竞态、空组删除实测）；443 passed，verify 13/13、audit 通过。整体终审（deepseek/deepseek-flash）REVISE，10 项发现全部修复并实测；报告存 .review/board-final-audit-20261108/（gitignored），调用预算 3/3（2 preflight + 1 派发；mimo 通道超时后切换 deepseek）。修补由主会话验收，未追加模型复评。
+
+#### 迁移影响
+- 面板行为与文档一致；无配置格式变更，board-groups.json 结构不变。
+
 ### Board：时间排序、列表视图、失败原因直显、归档工作流与扫描缓存
 
 #### 变更内容

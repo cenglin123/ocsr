@@ -4,6 +4,7 @@
 
 ## 当前状态
 
+- Board 整体终审修复已落地：遥测归属改取启动后最早终态行（reported 中间行不再误绑）、缓存代次防回填竞态、error:exit_code_N 文案修正、空手动组可删除、拖放保存校验 resp.ok、KILL 前二次核对进程命令行、POSIX 保留端口 reuse 等。443 passed（439+4），verify 13/13、audit、diff/eol 通过；空组删除/非法 payload/动态轮询文案实测。整体终审（deepseek-flash）REVISE，10 项发现全部修复并实测；报告 `.review/board-final-audit-20261108/`。预算 3/3（2 preflight + 1 派发；mimo 超时切 deepseek）。修补主会话验收。
 - Board 第三轮增强已落地：组内时间排序、卡片/列表视图（启动时间列）、失败原因直显、归档工作流（批量归档已结束 + 已归档视图可恢复，组归档单张恢复拆逐卡）、/api/state 10s 扫描缓存 + 自适应轮询（修复大 TEMP 目录下面板持续高 CPU，缓存命中 14–31ms）。439 passed（438+1），verify 13/13、audit、diff/eol 通过；全部新交互 playwright 实测。fresh reviewer（deepseek-flash）REVISE，9 项发现全部修复并实测；报告 `.review/board-list-sort-20261107/`。预算 2/2，修补主会话验收。
 - OCSR Board 第二轮交互增强已落地：状态 chips 点击直筛、时间窗筛选（最近活动时间口径）、文件夹组折叠/聚焦/整组隐藏/组内限量展开、扫描根在线增删（board-groups.json 的 roots 字段，失效根可移除）。438 passed（432+6），verify 13/13、audit、diff/eol 通过；全部新交互 playwright 实测。fresh reviewer（deepseek-flash）REVISE，13 项发现全部修复并复验；报告 `.review/board-ux-20261107/`。预算 2/2。worker key 新增扫描根哈希前缀，此前手动分组/隐藏记录需重新操作一次。
 
