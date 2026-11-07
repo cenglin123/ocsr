@@ -142,7 +142,8 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
   </select>
   <input id="new-group" placeholder="新分组名（回车）" size="14">
   <button id="btn-roots">⚙ 扫描目录</button>
-  <button id="btn-show-hidden">显示已隐藏 (0)</button>
+  <button id="btn-archive-done" title="把当前筛选结果中所有已结束（非进行中）的卡片归档，可在「已归档」中恢复">归档已结束</button>
+  <button id="btn-show-hidden" title="查看/恢复已归档的卡片与组">已归档 (0)</button>
   <span class="meta" id="meta"></span>
 </div>
 <div id="roots-panel">
@@ -238,7 +239,7 @@ function rowView(w){
     <td>${fmtDur(w)}</td>
     <td>${esc(w.session_id?w.session_id.slice(0,14)+"…":"—")}</td>
     <td><button data-act="sid">⧉</button> <button data-act="resume">返工</button>
-      <button data-act="detail">详情</button> <button data-act="hide">${hidden.has(w.key)?"取消隐藏":"隐藏"}</button></td>
+      <button data-act="detail">详情</button> <button data-act="hide">${archiveLabel(w.key)}</button></td>
   </tr>`;
 }
 function fmtDur(w){
@@ -264,8 +265,9 @@ function groupOf(w){return DATA.assignments[w.key]||(w.cwd||"（未知工作目�
 function filtered(){
   const st=$("f-status").value, mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
   return DATA.workers.filter(w=>{
-    // 「显示已隐藏」只跳过隐藏判定，状态/模型/时间/关键字筛选仍然生效
-    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
+    // 主视图排除已归档；「已归档」视图只看已归档。其余筛选在两种视图下都生效
+    const archived=hidden.has(w.key)||hiddenGroups.has(groupOf(w));
+    if(showHidden?!archived:archived)return false;
     if(st!=="all"&&w.badge!==st)return false;
     if(mo!=="all"&&w.model!==mo)return false;
     if(!timeOk(workerTime(w)))return false;
@@ -279,7 +281,8 @@ function renderChips(list){
   // 与点 chip 后看到的数量一致
   const mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
   const base=DATA.workers.filter(w=>{
-    if(!showHidden&&(hidden.has(w.key)||hiddenGroups.has(groupOf(w))))return false;
+    const archived=hidden.has(w.key)||hiddenGroups.has(groupOf(w));
+    if(showHidden?!archived:archived)return false;
     if(mo!=="all"&&w.model!==mo)return false;
     if(!timeOk(workerTime(w)))return false;
     if(q&&!(w.label+" "+w.session_id+" "+w.cwd+" "+w.key).toLowerCase().includes(q))return false;
@@ -299,6 +302,7 @@ function renderChips(list){
     chip("stale","◌ 滞留",c.stale,"")+
     `<span class="chip static">显示 ${list.length} / ${DATA.workers.length}</span>`;
 }
+function archiveLabel(key){return hidden.has(key)?"恢复":"归档";}
 function card(w){
   const sid=w.session_id?`${esc(w.session_id.slice(0,14))}…`:"—";
   const dur=fmtDur(w);
@@ -312,7 +316,7 @@ function card(w){
     <div class="durbar"><i style="width:${durPct}%"></i></div>
     <div class="actions">
       <button data-act="resume">复制返工命令</button>
-      <button data-act="hide">${hidden.has(w.key)?"取消隐藏":"隐藏"}</button>
+      <button data-act="hide">${archiveLabel(w.key)}</button>
     </div>
     <details><summary>详情</summary>${detailDl(w)}</details>
   </div>`;
@@ -333,7 +337,7 @@ function groupSection(name,ws){
       <span class="count">(${ws.length})</span>
       <span class="gops">
         <button data-gact="focus" data-group="${esc(name)}" title="只看此组">聚焦</button>
-        <button data-gact="hide" data-group="${esc(name)}" title="整组隐藏（视图层，不删文件）">${hiddenGroups.has(name)?"取消隐藏":"隐藏"}</button>
+        <button data-gact="hide" data-group="${esc(name)}" title="整组归档（视图层，不删证据文件）">${hiddenGroups.has(name)?"恢复":"归档"}</button>
       </span></div>
     ${body}${more}</section>`;
 }
@@ -354,7 +358,7 @@ function render(){
     html+=groupSection(name,ws);
   }
   const manual=[...new Set([...Object.values(DATA.assignments),...pendingGroups])]
-    .filter(g=>!groups.has(g)&&(showHidden||!hiddenGroups.has(g)));  // 隐藏的空手动组同样不渲染
+    .filter(g=>!groups.has(g)&&(showHidden?hiddenGroups.has(g):!hiddenGroups.has(g)));  // 空组随归档状态进出视图
   for(const name of manual){
     if(focusGroup&&name!==focusGroup)continue;
     html+=groupSection(name,[]);
@@ -373,7 +377,8 @@ function render(){
       <td>${esc(r.wall_min??"—")}</td><td>${esc(r.artifact_bytes??"—")}</td><td>${esc(r.read_audit||"")}</td></tr>`;
   }).join("");
   $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 5s 轮询`;
-  $("btn-show-hidden").textContent=(showHidden?"隐藏已隐藏":"显示已隐藏")+` (${hidden.size+hiddenGroups.size})`;
+  $("btn-show-hidden").textContent=(showHidden?"返回主视图":"已归档")+` (${hidden.size+hiddenGroups.size})`;
+  $("btn-archive-done").textContent=showHidden?"恢复当前筛选":"归档已结束";
   renderRoots();
 }
 function renderRoots(){
@@ -504,6 +509,21 @@ $("btn-root-add").addEventListener("click",async()=>{
   }catch(err){toast("添加失败");}
 });
 $("btn-show-hidden").addEventListener("click",()=>{showHidden=!showHidden;render();});
+$("btn-archive-done").addEventListener("click",()=>{
+  if(showHidden){
+    // 归档视图：批量恢复当前筛选下的卡片与所在组
+    const list=filtered();
+    if(!list.length){toast("当前筛选下没有已归档卡片");return;}
+    for(const w of list){hidden.delete(w.key);hiddenGroups.delete(groupOf(w));}
+    saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);
+    render();toast(`已恢复 ${list.length} 张`);return;
+  }
+  const done=filtered().filter(w=>w.badge!=="active"&&!hidden.has(w.key));
+  if(!done.length){toast("当前筛选下没有可归档的已结束卡片");return;}
+  for(const w of done)hidden.add(w.key);
+  saveSet("ocsr-board-hidden",hidden);
+  render();toast(`已归档 ${done.length} 张，点「已归档」可查看或恢复`);
+});
 for(const id of["f-status","f-model","f-q","f-time"])$(id).addEventListener("input",render);
 $("sort-by").addEventListener("input",()=>{savePref("ocsr-board-sort",$("sort-by").value);render();});
 $("view-mode").addEventListener("input",()=>{savePref("ocsr-board-view",$("view-mode").value);render();});
