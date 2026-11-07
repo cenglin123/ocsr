@@ -12,7 +12,7 @@
 - 移除 settings namespace 与 `ocsr.jobs` session 投影两个平面：0.2.2 的 settings 服务改为 SettingsForms，不再有 register/get；projection 契约要求 zod `ZodType`（schemastery 无 `.parse`）且基础 bundle 默认挂载 `session-projection-cache`，OCSR 的内存投影按设计会自禁用。删除 `lib/settings-ocsr.js`、`lib/projection-ocsr.js`。
 - 新增适配层回归：`tests/adapter/*.test.mjs`（Node 内置 `node:test`，11 项契约回归，对真实 dsh 0.2.2 运行时验安装版本门、真实 SkillRegistry 的 skill provider、bundle patch entry 与 package exports 对齐、tool 定义与输出 schema、Config 窄门语义、后台输出环与状态映射、`job_kill` 的 killed 映射、jobs 缺失时的 code 5）与 pytest 桥 `tests/test_dsh_adapter.py`（枚举测试文件逐个传给 node；缺 0.2.2 运行时或 Node 时 skip，`OCSR_REQUIRE_ADAPTER_TESTS=1` 可把 skip 变成失败；运行时自动探测，`DSH_RUNTIME_ROOT` 可固定运行时并关闭自动探测）。`package.json` 新增 `scripts.test:adapter`，`files` 改为显式 glob（`lib/*.js`、`SKILL.md`、`scripts/*.py`、`scripts/*.ps1`、`scripts/*.cs`、`refs/*.md`、`cordis.patch.yml`），使 `npm pack` 不再打入 `scripts/__pycache__/*.pyc`。
 - 文档同步：`refs/dsh-integration.md`、`docs/CURRENT.md`、`docs/deployment.md` 按 0.2.2 契约重写/校正（preset 名单 `minimal/standard/ptc/cordis`、白名单唯一事实源、双 entry、已移除平面、验证命令）。
-- 408 passed（含适配层 pytest 桥）；`verify_ocsr_skill.py` 13/13、`audit.py check`、适配层 Node 套件 8/8 与 `git diff --check` 通过。
+- 408 passed（含适配层 pytest 桥）；`verify_ocsr_skill.py` 13/13、`audit.py check`、适配层 Node 套件 11/11 与 `git diff --check` 通过。
 
 #### 迁移影响
 - 已装旧版 profile 需重新 `dsh plugin --profile <p> add .`（或升级到 0.2.0）才能拿到双 entry 与 0.2.2 jobs 契约；宿主低于 `^0.2.2-rc.1` 时安装预检会拒绝、加载期 bundle 被 skip，不要用 `allow-version` 豁免绕过。
@@ -20,6 +20,18 @@
 - 白名单仍只在用户本地 `~/.ocsr/allowed-models.json` 维护，包内没有 `config/`，重装不会带出模型池。
 - 依赖 `ocsr.jobs` 投影的外部观察面消失；job 生命周期改从 jobs 服务自身读取，`job_output`/`job_kill` 不受影响。
 - 适配层回归需要本机 0.2.2 运行时；无可探测运行时或 Node 的机器上 pytest 桥会 skip，不算失败。
+
+### 插件市场收录素材与 npm 元数据
+
+#### 变更内容
+- 新增 `assets/icon-180.png`：由 OpenCode logo（MIT）派生——重新配色并把内部矩形拆成三根竖条表示并行 worker；署名与来源写在 `assets/README.md`，注明与 OpenCode 项目无从属关系。
+- 新增 3 张市场截图 `assets/screenshot-{1,2,3}-*.png`（派发链路、模型门语义、`dsh --dump-config` 的两个 entry）与 `screenshots.json`（1–8 张，路径相对该文件）；截图是架构示意与真实命令输出，不是伪造的 GUI 画面。
+- `package.json` 补齐 npm 元数据：`description`、`keywords`、`homepage`、`repository`、`bugs`、`author`、`publishConfig.access: public`。`repository` 指回本仓库，供插件市场自动关联 npm 包；`files` 仍不打包 `assets/` 与 `screenshots.json`（市场从 GitHub 读取）。
+- 修正 CHANGELOG 中适配层 Node 套件数字（8/8 → 11/11）。
+
+#### 迁移影响
+- 无行为变更；安装方式与版本门不受影响。
+- 发布 npm 包需要 npm 凭据与 `@ocsr` scope（未发布前市场只展示 GitHub 安装方式）。
 
 ## 2026-11-02
 
