@@ -5,8 +5,8 @@
   worker-state.json / session-binding.json / start.marker / launcher.ps1
 - 历史：~/.ocsr/dispatch-log.jsonl 尾部
 - 扫描根 = 默认 TEMP + CLI --work-dir + 面板「扫描目录」里在线增删的自定义根
-面板自身唯一可写文件是 ~/.ocsr/board-groups.json（手动分组 assignments 与
-自定义扫描根 roots）。
+面板自身可写文件仅两个（均在 ~/.ocsr/）：board-groups.json（手动分组与自定义
+扫描根配置）与 board.lock（单实例锁，退出时清除）。
 
 端口策略：默认 8787；被旧 ocsr_board 占用时 KILL 旧实例后复用同端口
 （等同重启）；被其他程序占用时依次向后探测 8788..8797。
@@ -114,7 +114,9 @@ def _worker_fingerprint(wd: Path) -> tuple:
     return tuple(fp)
 
 
-# 增量扫描缓存：worker 目录内容指纹 → 已解析的 worker 字典
+# 增量扫描缓存：worker 目录内容指纹 → 已解析的 worker 字典。
+# 线程约束：这些模块级缓存只允许在持有 _STATE_LOCK 时读写（build_state 全程持有）；
+# 测试为单线程。新增直调点必须遵守同一约束。
 _WORKER_CACHE: dict[str, dict[str, Any]] = {}
 
 
@@ -249,16 +251,12 @@ def scan_workers(temp_root: Path, days: int = 7) -> list[dict[str, Any]]:
         for wd in labels:
             if wd.is_dir():
                 workers.append(scan_worker_dir(wd, entry.name, started, root=entry.parent))
-    # 淘汰已不在扫描集内的缓存项（目录被清理后不留存量）
-    alive = {w["dir"] for w in workers}
-    for key in list(_WORKER_CACHE):
-        if key not in alive:
-            del _WORKER_CACHE[key]
     return workers
 
 
-# dispatch-log 增量读取缓存：记住上次读到的偏移，只解析新增完整行
-_HISTORY_CACHE: dict[str, Any] = {"path": None, "offset": 0, "records": []}
+# dispatch-log 增量读取缓存：记住上次读到的偏移与末行内容（一致性校验用），只解析新增完整行
+_HISTORY_CACHE: dict[str, Any] = {"path": None, "offset": 0, "records": [],
+                                  "last_line": b"", "last_line_start": 0}
 
 
 def _parse_history_lines(lines: list[str], records: list[dict[str, Any]]) -> None:
@@ -287,12 +285,26 @@ def read_history(log_path: Path, limit: int = 200, tail_bytes: int = 2_000_000) 
     try:
         size = log_path.stat().st_size
     except OSError:
+        # 文件被删除：重置缓存（否则替换/重建后会从旧偏移续读出混合历史）
+        _HISTORY_CACHE.update(path=None, offset=0, records=[], last_line=b"", last_line_start=0)
         return []
     cache = _HISTORY_CACHE
     if cache["path"] == str(log_path) and cache["offset"] == size:
         return cache["records"][-limit:]
     if cache["path"] != str(log_path) or size < cache["offset"]:
-        cache.update(path=str(log_path), offset=0, records=[])
+        cache.update(path=str(log_path), offset=0, records=[], last_line=b"", last_line_start=0)
+
+    # 一致性校验：续读前核对缓存末行当前内容；不一致说明文件被替换/截断后
+    # 又长过旧偏移，必须全量重读（否则会把旧记录与新文件中段混合）
+    if cache["offset"] > 0 and cache["last_line"]:
+        try:
+            with log_path.open("rb") as fh:
+                fh.seek(cache["last_line_start"])
+                current = fh.read(len(cache["last_line"]))
+            if current != cache["last_line"]:
+                cache.update(offset=0, records=[], last_line=b"", last_line_start=0)
+        except OSError:
+            cache.update(offset=0, records=[], last_line=b"", last_line_start=0)
 
     if cache["offset"] == 0:
         start = max(0, size - tail_bytes)
@@ -315,6 +327,11 @@ def read_history(log_path: Path, limit: int = 200, tail_bytes: int = 2_000_000) 
     _parse_history_lines(lines, cache["records"])
     cache["records"] = cache["records"][-limit:]
     cache["offset"] = start + last_nl + 1
+    # 记录末行内容与起始偏移，供下次续读的一致性校验
+    raw_lines = complete.split(b"\n")
+    last = raw_lines[-2] if len(raw_lines) >= 2 else b""
+    cache["last_line"] = last
+    cache["last_line_start"] = start + last_nl + 1 - len(last) - 1 if last else cache["offset"]
     return cache["records"][-limit:]
 
 
@@ -552,15 +569,18 @@ def verify_board_process(pid: int) -> bool:
 
 
 def _restart_existing_instance() -> None:
-    """单实例：锁文件指向活面板进程时 KILL 后重启（与 ensure_port 的重启语义一致）。"""
+    """单实例：锁文件指向活面板进程时 KILL 后重启。在新实例已成功 bind 后调用，
+    避免新实例起不来时用户连旧面板也失去。缺 port 或 identity 不符一律不动。"""
     data = _load_json(LOCK_PATH)
     pid = data.get("pid")
     if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
         return
+    port = data.get("port")
+    if not isinstance(port, int):
+        return  # 缺 port 无法做 identity 复核，不杀
     if not verify_board_process(pid):
         return
-    port = data.get("port")
-    if isinstance(port, int) and probe_board_identity(port).get("pid") != pid:
+    if probe_board_identity(port).get("pid") != pid:
         return  # 端口身份与锁文件不符，不动
     kill_pid(pid)
     time.sleep(1)
@@ -662,6 +682,11 @@ def build_state(handler: "BoardHandler", force: bool = False) -> dict[str, Any]:
             workers: list[dict[str, Any]] = []
             for root in roots:
                 workers.extend(scan_workers(root, handler.days))
+            # 淘汰在全部根扫描完成后统一执行（按根淘汰会让多根配置下缓存互相清零）
+            alive = {w["dir"] for w in workers}
+            for key in list(_WORKER_CACHE):
+                if key not in alive:
+                    del _WORKER_CACHE[key]
             history = read_history(handler.log_path)
             attach_telemetry(workers, history)
             payload = {
@@ -838,7 +863,6 @@ def main() -> int:
                     help="无页面请求的空闲退出分钟数（默认 30；0=禁用）")
     args = ap.parse_args()
 
-    _restart_existing_instance()  # 单实例：已有活面板则 KILL 后重启
     BoardHandler.days = args.days
     if args.work_dir:
         BoardHandler.cli_roots = [Path(d) for d in args.work_dir]
@@ -855,6 +879,9 @@ def main() -> int:
     if server is None:
         print(f"[board] 端口 {args.port} 附近均被占用或绑定失败", file=sys.stderr)
         return 1
+    # 单实例锁文件记录的（可能跨端口）旧实例：在新实例已成功 bind 后才 KILL，
+    # 避免新实例起不来时连旧面板也失去
+    _restart_existing_instance()
     url = f"http://127.0.0.1:{port}"
     note = {"fresh": "", "restarted": "（旧实例已终止，同端口重启）",
             "moved": f"（{args.port} 被非面板程序占用，已换端口）"}[action]

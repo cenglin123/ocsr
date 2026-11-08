@@ -64,7 +64,7 @@ python scripts/ocsr_board.py            # 默认 127.0.0.1:8787，自动开浏�
 python scripts/ocsr_board.py --days 30  # 扩大派发目录扫描窗口（默认 7 天；0=全部）
 ```
 
-面板是纯只读观察者：扫描派发目录下的 worker-state、session-binding、start.marker 与 `~/.ocsr/dispatch-log.jsonl`，不改派发、看门狗或遥测链路；唯一可写文件是面板私有的 `~/.ocsr/board-groups.json`（`assignments` 手动分组 + `roots` 自定义扫描根）。
+面板是纯只读观察者：扫描派发目录下的 worker-state、session-binding、start.marker 与 `~/.ocsr/dispatch-log.jsonl`，不改派发、看门狗或遥测链路；面板自身可写文件仅 `~/.ocsr/board-groups.json`（`assignments` 手动分组 + `roots` 自定义扫描根）与 `~/.ocsr/board.lock`（单实例锁，退出时清除）。
 
 - **筛选**：顶部状态 chips 点击直筛（再点取消）；状态下拉、模型下拉、关键字、时间窗（近 1h/今天/近 3 天/近 7 天/全部，按最近活动时间判定）；chip 计数跟随其余筛选条件（facet 口径）。遥测历史同样受时间/模型/关键字筛选。
 - **排序与视图**：组内按启动时间倒序/正序/状态优先排序（默认时间倒序）；卡片/列表视图切换，列表含启动时间、模型、状态、时长、session 列，行内可展开详情、可拖动分组。失败卡片直接显示人性化原因（如「进程正常退出，但产物未落盘」对应遥测 exit_0_no_artifact；非零退出码、文件名不符等）。排序与视图偏好存 localStorage。
