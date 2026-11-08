@@ -83,6 +83,8 @@ def _register_dispatch_root(base: Path) -> None:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             data = {}
+        if not isinstance(data, dict):
+            data = {}  # 顶层非对象（null/[]/数字）按空处理，不中断派发
         roots = data.get("roots") if isinstance(data.get("roots"), list) else []
         now = datetime.datetime.now().astimezone()
         resolved = str(base.resolve())
@@ -96,12 +98,22 @@ def _register_dispatch_root(base: Path) -> None:
                     kept.append(r)
             except (ValueError, TypeError):
                 continue
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"roots": kept}, ensure_ascii=False, indent=1) + "\n",
-                       encoding="utf-8", newline="\n")
-        os.replace(tmp, path)
-    except OSError:
-        pass  # 登记失败不影响派发
+        # 唯一临时名 + 重试：并发 dispatcher 同时登记时避免 Windows 下
+        # 固定 tmp 名被对端持有导致 replace 冲突；登记失败打印警告（不静默）
+        import uuid
+        tmp = path.with_name(path.stem + f"-{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_text(json.dumps({"roots": kept}, ensure_ascii=False, indent=1) + "\n",
+                           encoding="utf-8", newline="\n")
+            os.replace(tmp, path)
+        except OSError as exc:
+            print(f"[ocsr] WARN 派发根登记失败（不影响派发）: {exc}", file=sys.stderr)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except OSError as exc:
+        print(f"[ocsr] WARN 派发根登记失败（不影响派发）: {exc}", file=sys.stderr)
 CONVERGE_LEDGER_NAME = "ocsr-dispatch-ledger.jsonl"  # 入库账本（随收敛证据一起提交）
 # dispatch 退出码契约（单一事实源见 refs/dispatch-patterns.md §退出码契约）
 #   0 = 全部 worker 落盘
@@ -365,9 +377,10 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
             Add-Type -TypeDefinition $jobSource -ErrorAction Stop
             [OcsrLauncherJob]::AttachCurrentProcess()
           }}
+          Set-Location -LiteralPath '{cwd_literal}'
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
           $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
-          & opencode run $prompt --format json --standalone {text} 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
+          & opencode run $prompt --format json --standalone {text} '{cwd_literal}' 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
             $line = [string]$_
             $line | Add-Content "$PSScriptRoot/run.log" -Encoding UTF8
             try {{
@@ -1810,7 +1823,7 @@ def _dispatch_batch(
         session_arg = f"--session {p['resume_session']} " if p.get("resume_session") else ""
         model_arg = f'{session_arg}-m {p["model"]} --title "ocsr-{safe_label}"'
         _write_utf8(wd / "launcher.ps1",
-                    _pwsh_code(model_arg, cwd=binding_cwd or str(Path.cwd())))
+                    _pwsh_code(model_arg, cwd=binding_cwd or str(_resolve_execution_dir(work_dir))))
 
         if progress:
             print(f"[ocsr] [{i+1}/{len(parsed)}] 已就绪: {p['label']} ({p['model']}) → {p['output']}")
@@ -1855,7 +1868,8 @@ def _dispatch_batch(
         (wd / "start.marker").write_text(
             f"pwsh started {datetime.datetime.now().astimezone().isoformat()}\n", encoding="utf-8")
         parsed[i]["work_dir"] = wd
-        parsed[i]["execution_dir"] = _resolve_execution_dir(work_dir)  # worker 执行目录 = --work-dir（默认 dispatcher cwd）
+        # resume 时沿用原绑定目录，否则用 --work-dir（与 launcher 实际 Set-Location 一致）
+        parsed[i]["execution_dir"] = binding_cwd or str(_resolve_execution_dir(work_dir))
         launched_row: dict[str, object] = {
             "event": "launched",
             "batch_id": batch_id,

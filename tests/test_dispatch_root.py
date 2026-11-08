@@ -68,6 +68,27 @@ class DispatchRootDecoupleTest(unittest.TestCase):
                           Path("Z:/no/such/dir-xyz/dispatch-roots.json")):
             mod._register_dispatch_root(Path(tempfile.gettempdir()))  # 不抛异常
 
+    def test_register_tolerates_non_dict_payload(self):
+        # 顶层为 null/[]/数字时按空处理，不中断派发
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = Path(tmp) / "reg.json"
+            for bad in ("null", "[]", "5"):
+                reg.write_text(bad, encoding="utf-8")
+                with patch.object(mod, "DISPATCH_ROOTS_REGISTRY", reg):
+                    mod._register_dispatch_root(Path(tmp))  # 不抛 AttributeError
+                data = json.loads(reg.read_text(encoding="utf-8"))
+                self.assertIsInstance(data, dict)
+                self.assertIn("roots", data)
+
+    def test_launcher_actually_changes_directory(self):
+        # --work-dir 必须真正接线到 launcher：Set-Location 在 opencode 之前执行，
+        # 且 opencode 的位置参数目录（仅对 git 项目目录生效）与之一致
+        script = mod._pwsh_code("-m vendor/model-a --title t", cwd="C:/wt/foo")
+        self.assertIn("Set-Location -LiteralPath 'C:/wt/foo'", script)
+        self.assertLess(script.index("Set-Location"), script.index("& opencode run"))
+        # 位置参数目录在 opencode 命令末尾（git 项目目录时被 opencode 采纳）
+        self.assertIn("'C:/wt/foo'", script.split("& opencode run")[1])
+
 
 if __name__ == "__main__":
     unittest.main()

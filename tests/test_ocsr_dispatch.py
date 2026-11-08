@@ -30,6 +30,10 @@ assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = mod
 SPEC.loader.exec_module(mod)
 
+# 测试隔离：派发根登记写到每次运行唯一的测试文件，不污染用户真实 ~/.ocsr/dispatch-roots.json
+import uuid as _uuid
+mod.DISPATCH_ROOTS_REGISTRY = Path(tempfile.gettempdir()) / f"ocsr-test-dispatch-roots-{_uuid.uuid4().hex}.json"
+
 # ─── 测试 1: 字段写入默认值 ────────────────────────────────────────────
 class TestFieldDefaults:
     def test_minimal_call_has_all_new_fields(self):
@@ -2602,6 +2606,7 @@ class TestResumeFrom:
         resume_wd = tmp_path / "unused"
         args = _resume_dispatch_args(tmp_path, resume_wd)
         args.resume_from = None
+        args.work_dir = None  # 未指定 --work-dir：worker 执行目录应为 dispatcher cwd
         assert mod.cmd_dispatch(args) == 0
         launcher = (self.launched[0] / "launcher.ps1").read_text(encoding="utf-8")
         assert f"cwd = '{Path.cwd()}'" in launcher

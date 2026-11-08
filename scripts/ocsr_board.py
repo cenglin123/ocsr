@@ -432,7 +432,11 @@ def load_config(path: Path = GROUPS_PATH) -> dict[str, Any]:
     if not isinstance(roots, list):
         roots = []
     roots = [r for r in roots if isinstance(r, str) and r]
-    return {"assignments": assignments, "roots": roots}
+    ignored = data.get("ignored_roots")
+    if not isinstance(ignored, list):
+        ignored = []
+    ignored = [r for r in ignored if isinstance(r, str) and r]
+    return {"assignments": assignments, "roots": roots, "ignored_roots": ignored}
 
 
 def load_assignments(path: Path = GROUPS_PATH) -> dict[str, str]:
@@ -492,9 +496,11 @@ def registered_dispatch_roots() -> list[Path]:
             continue
         try:
             last = datetime.fromisoformat(str(r.get("last_used", "")))
-        except ValueError:
+            if last.tzinfo is None:
+                last = last.astimezone()  # naive 时间戳按本地时区解释，不与 aware 相减抛 TypeError
+        except (ValueError, TypeError):
             continue
-        if (now - last).days > 30:
+        if last < now - timedelta(days=30):  # 与 dispatcher 的 cutoff 口径一致
             continue
         p = Path(raw)
         try:
@@ -510,11 +516,14 @@ def effective_roots(base: Path, path: Path = GROUPS_PATH,
     """默认 TEMP + CLI --work-dir + 配置自定义根 + 驱动器登记的派发根
     （去重、跳过不存在目录）。登记机制让任意 --dispatch-root 的派发自动可见。"""
     base_resolved = str(base.resolve())
+    ignored = set(load_config(path)["ignored_roots"])
     roots = [base]
     seen = {base_resolved}
     for p in list(extra or []) + [Path(r) for r in load_config(path)["roots"]] + registered_dispatch_roots():
         try:
             resolved = str(p.resolve())
+            if resolved in ignored:
+                continue  # 用户显式忽略的根（含登记根）不扫描
             if p.is_dir() and resolved not in seen:
                 roots.append(p)
                 seen.add(resolved)
@@ -547,6 +556,14 @@ def mutate_roots(action: str, raw_path: Any, base: Path,
             if raw_path.strip() not in roots:
                 return [], "只能移除额外添加的扫描根"
             roots.remove(raw_path.strip())
+        elif action in ("ignore", "unignore"):
+            # 登记根/任意根的可忽略逃生口：只改面板配置，不改驱动器登记文件
+            resolved = str(p.resolve())
+            ignored = config["ignored_roots"]
+            if action == "ignore" and resolved not in ignored:
+                ignored.append(resolved)
+            elif action == "unignore" and resolved in ignored:
+                ignored.remove(resolved)
         else:
             return [], "未知 action"
         _write_config(config, path)
@@ -720,13 +737,16 @@ def build_state(handler: "BoardHandler", force: bool = False) -> dict[str, Any]:
                     del _WORKER_CACHE[key]
             history = read_history(handler.log_path)
             attach_telemetry(workers, history)
+            registered = {str(p.resolve()) for p in registered_dispatch_roots()}
             payload = {
                 "workers": workers,
                 "history": history,
                 "assignments": cfg["assignments"],
                 "roots": [{"path": str(r), "kind": "default" if r == handler.base_root
-                           else ("cli" if r in handler.cli_roots else "custom")}
+                           else ("cli" if r in handler.cli_roots
+                                 else ("registered" if str(r.resolve()) in registered else "custom"))}
                           for r in roots],
+                "ignored_roots": cfg["ignored_roots"],
                 # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
                 "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
                 "generated_at": datetime.now().astimezone().isoformat(),

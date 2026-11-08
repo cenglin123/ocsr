@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -12,8 +13,9 @@ SPEC = importlib.util.spec_from_file_location("ocsr_board_inc", BOARD_PATH)
 board = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(board)
-# 测试环境隔离：登记根默认指向不存在路径（避免本机真实 dispatch-roots.json 串扰）
-board.DISPATCH_ROOTS_REGISTRY = Path(tempfile.gettempdir()) / "ocsr-test-no-roots.json"
+# 测试环境隔离：登记根默认指向每次运行唯一且不存在路径（避免本机真实 dispatch-roots.json 串扰）
+board.DISPATCH_ROOTS_REGISTRY = Path(tempfile.gettempdir()) / f"ocsr-test-no-roots-{uuid.uuid4().hex}.json"
+assert not board.DISPATCH_ROOTS_REGISTRY.exists()
 
 
 def make_worker(root: Path, label="w1", state="landed"):

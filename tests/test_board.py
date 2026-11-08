@@ -7,6 +7,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -15,8 +16,9 @@ SPEC = importlib.util.spec_from_file_location("ocsr_board", BOARD_PATH)
 board = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(board)
-# 测试环境隔离：登记根默认指向不存在路径（避免本机真实 dispatch-roots.json 串扰）
-board.DISPATCH_ROOTS_REGISTRY = Path(tempfile.gettempdir()) / "ocsr-test-no-roots.json"
+# 测试环境隔离：登记根指向每次运行唯一且不存在路径（避免本机真实 dispatch-roots.json 串扰）
+board.DISPATCH_ROOTS_REGISTRY = Path(tempfile.gettempdir()) / f"ocsr-test-no-roots-{uuid.uuid4().hex}.json"
+assert not board.DISPATCH_ROOTS_REGISTRY.exists()
 
 
 def make_dispatch(root: Path, name="ocsr_dispatch_20261107_120000_abcd1234", label="w1",
