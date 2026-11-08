@@ -522,6 +522,31 @@ def _read_session_binding(wd: Path) -> tuple[str, str]:
     return "available", sid
 
 
+def _landed_session_note(wd: Path) -> str:
+    """落盘输出附带的 session= 字段（轻量读 session-binding，不做返工级强校验）。
+
+    用途：让 converge/上层编排的 instance_id 从 dispatch 输出直接复制，
+    消除人工读 JSON 转录的重复失误（实证：三次转录错误导致归档冲突）。
+    """
+    binding = _read_json_object(wd / SESSION_BINDING_FILE) or {}
+    sid = binding.get("session_id")
+    return f", session={sid}" if isinstance(sid, str) and sid else ""
+
+
+def cmd_session_id(args) -> int:
+    """只读输出 worker 的 session_id（供编排层脚本化取用，不人工转录）。"""
+    binding = _read_json_object(Path(args.worker_dir) / SESSION_BINDING_FILE)
+    if binding is None:
+        print("缺少 session-binding.json 或格式错误", file=sys.stderr)
+        return 2
+    sid = binding.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        print("session_id 缺失或非法", file=sys.stderr)
+        return 2
+    print(sid)
+    return 0
+
+
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
 
@@ -2343,7 +2368,7 @@ def _watch_loop(
                 if fm and fm.get("verdict"):
                     landed_row["verdict"] = fm["verdict"]
                 _append_dispatch_ledger(ledger, landed_row)
-                print(f"[ocsr] ✅ {p['label']} 落盘 ({output.stat().st_size}B, {elapsed:.1f}min{verdict})")
+                print(f"[ocsr] ✅ {p['label']} 落盘 ({output.stat().st_size}B, {elapsed:.1f}min{verdict}{_landed_session_note(wd)})")
                 landed.add(i)
                 state = _read_json_object(wd / WORKER_STATE_FILE) or {}
                 state.update({"state": "landed", "artifact_state": "landed"})
@@ -3542,6 +3567,10 @@ def main():
     p_diag.add_argument("--worker-dir", required=True)
     p_diag.add_argument("--session-db", help="显式 OpenCode v2 SQLite 路径；不猜测数据库位置或最新会话")
 
+    # session-id：只读输出 session_id（converge/上层编排的 instance 取用，避免人工转录）
+    p_sid = sub.add_parser("session-id", help="只读输出 worker 的 session_id（从 session-binding.json）")
+    p_sid.add_argument("--worker-dir", required=True)
+
     # preflight
     p_pre = sub.add_parser("preflight", help="批量探测模型通道可用性")
     p_pre.add_argument("--model", action="append", required=True,
@@ -3571,6 +3600,8 @@ def main():
         return cmd_preflight(args)
     elif args.command == "diagnose":
         return cmd_diagnose(args)
+    elif args.command == "session-id":
+        return cmd_session_id(args)
     else:
         parser.print_help()
         return 1

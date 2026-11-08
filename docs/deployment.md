@@ -29,6 +29,7 @@ launcher 以 UTF-8 接收原生 stdout，JSONL 写入 `run.log`；stderr 独立�
 ```powershell
 python scripts/ocsr_dispatch.py diagnose --worker-dir <worker-dir>
 python scripts/ocsr_dispatch.py diagnose --worker-dir <worker-dir> --session-db <opencode-v2-db>
+python scripts/ocsr_dispatch.py session-id --worker-dir <worker-dir>   # 只读输出 session_id（编排层 instance 取用）
 ```
 
 `diagnose` 只输出 JSON，不调用模型、不改 worker 文件。默认不访问数据库；需要原生元数据时显式传入路径，可用 `opencode debug paths` 在本机确认位置。watcher 可通过 `dispatch --diagnostic-session-db <opencode-v2-db>` 在检查点附加同样的元数据。读取使用 Python 标准库 `sqlite3`（须带 JSON 函数），仅支持已核对的 OpenCode v2 `session_message` schema；未知结构、锁或缺记录明确降级，不自动猜测路径或最新会话。查询只取精确绑定且不早于本次 launcher 启动的 assistant 状态/时间/工具输入长度，不取推理、工具输入/输出正文。

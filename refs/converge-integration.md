@@ -23,6 +23,8 @@ python <converge-scripts>/ocsr_spawn_adapter.py dispatch \
 
 适配层定位与 [SKILL.md 的执行后端边界](../SKILL.md)一致——它是 **converge 仓库侧** 的薄包装，**不**向 `ocsr_dispatch.py` 注入 converge 协议。本仓库（ocsr）的 `ocsr_dispatch.py` 保持框架无关，converge 是它的客户之一。
 
+**instance_id 的机械化获取**：`dispatch --watch` 的落盘输出行直接带 `session=<session_id>` 字段（从 session-binding.json 读取）；脚本化取用也可用 `python scripts/ocsr_dispatch.py session-id --worker-dir <worker目录>`（只读，缺失/非法 fail-closed exit 2）。上层编排（converge register-round 等）的 instance_id 应从这些渠道复制/读取，**不要人工转录**——实证：2026-11-08 的 converge 流程三次人工转录错误导致归档 `ledger-instance-conflict`，且 instance_id 属 Archive Contract 不可修正字段，无法事后纠错。
+
 **provenance 诚实降级**：OCSR 派发的 `opencode run` 当前不在产物中暴露 per-invocation 的 provider/model 字段，故 archive Contract 的 resolved provenance 只能记 `evidence_level=configured + resolution_source=cli_argument + resolution_reason_code=backend-does-not-expose`（PROVENANCE_MATRIX 下的 strictest legal honest choice）。`--instance-id`（ocsr batch_id）与 `--receipt`（ocsr-dispatch-ledger.jsonl:<rid>）作为非约束性关联句柄保留，不升格 evidence level。未来若 opencode 暴露 per-invocation tool_response 的 provider/model，可升级到 host-reported。
 
 **"edit X" 类任务的 sentinel 模式**：当 Spawn 的交付是"修改既有文件 + 写日志"而非"产出单一新文件"时（典型如 converge executor），`--output-name` 应指向一个 sentinel 文件（如 `done.marker`），prompt 显式让 executor 在完成所有工作后写入该 sentinel。否则 ocsr watcher 等不到期望产物、适配层会触发失败路径（recover-invocation + settle failed）——即使 executor 实际完成了工作。这是 faithful recording（archive Contract 捕获真实事件），但调用方需知晓此约定。
