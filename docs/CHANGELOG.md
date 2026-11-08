@@ -2,6 +2,20 @@
 
 ## 2026-11-08
 
+### Board 性能：增量扫描与生命周期管理
+
+#### 变更内容
+- **增量扫描**：worker 目录以关键文件（worker-state/session-binding/start.marker/launcher.ps1/run.log）的 mtime+size 指纹缓存解析结果，内容未变不重读（进行中时长与 deadline 滞留判定仍每次重算）；dispatch-log.jsonl 记住偏移只解析新增完整行（不完整尾行留待下次，截断则全量重读）；缓存随扫描集淘汰。
+- **目录遍历优化**：先按目录名纯字符串过滤再 is_dir/stat——修复大 TEMP（5 万+条目）下对全部条目逐个 stat 的瓶颈（实测 nt.stat 52,869 次→数百次；scan_workers 2.43s → 0.43s）。
+- **单实例**：~/.ocsr/board.lock（pid+port），重复启动经进程命令行复核与 identity 识别后 KILL 旧实例重启；退出时清除锁文件。
+- **空闲自动退出**：`--idle-timeout` 分钟无页面请求即退出（默认 30，0=禁用），孤儿面板不再常驻。
+- 前后实测：同一组派发目录 /api/state 重建冷扫 529ms、无变化 warm 432–559ms（原 2.4–2.9s）；重复启动旧实例被 KILL 新实例接管；空闲 1 分钟超时自动退出且锁文件清除。
+- 9 项新增离线测试（tests/test_board_incremental.py：指纹命中/失效、动态刷新、缓存淘汰、增量日志、截断重读、空闲退出、锁文件、单实例重启/忽略）；462 passed，verify 13/13、audit 通过。
+- 来源：handoff `C:\wt\handoff\20261108-ocsr-board-perf.md`（记忆底座会话转达）；计划 docs/plans/active/20261108-board-incremental-perf.md。
+
+#### 迁移影响
+- 面板进程生命周期完整：启动（命令/bat）→ 退出（按钮/关窗/空闲超时/同端口或锁文件重启）。--idle-timeout 默认 30 分钟，长期挂面板观察的会话需保持页面活动或调大。
+
 ### Board 使用性：退出按钮与双击启动脚本
 
 #### 变更内容
