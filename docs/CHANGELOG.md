@@ -2,6 +2,18 @@
 
 ## 2026-11-08
 
+### instance_id 机械化获取（消除人工转录）
+
+#### 变更内容
+- `dispatch --watch` 落盘输出行附带 `session=<session_id>`（从 session-binding.json 轻量读取），上层编排可直接复制，不再人工读 JSON 转录。
+- 新增只读子命令 `python scripts/ocsr_dispatch.py session-id --worker-dir <dir>`：输出 session_id，缺失/非法 fail-closed exit 2，供脚本化取用。
+- 动机：2026-11-08 converge 流程三次人工转录错误导致归档 ledger-instance-conflict，且 instance_id 属 Archive Contract 不可修正字段。工具化消除该类失误（硬约束优先于纪律提醒）。
+- 文档：refs/converge-integration.md 增加 instance_id 机械化获取规则；deployment.md 补 session-id 用法。
+- 4 项合成测试（tests/test_session_id.py）；452 passed，verify 13/13、audit 通过。
+
+#### 迁移影响
+- dispatch stdout 落盘行新增 session= 字段（附加信息，不改变既有字段与退出码）；session-id 为新增只读子命令，不影响既有派发路径。
+
 ### Board converge 收敛与落地
 
 #### 变更内容
