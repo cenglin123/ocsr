@@ -2,8 +2,18 @@
 
 ## 2026-11-08
 
-### instance_id 机械化获取（消除人工转录）
+### Board 使用性：退出按钮与双击启动脚本
 
+#### 变更内容
+- 工具栏新增「⏻ 退出」按钮：POST /api/shutdown（仅本机回环 + application/json，confirm 防误点），先回响应再异步关闭 server，优雅退出面板进程；页面显示重启指引。
+- 仓库根新增 `启动面板.bat`：双击启动并自动开浏览器，关闭控制台窗口即退出进程。
+- 使用模式明确：按需启动、不必常驻；无浏览器打开时零请求零 CPU；重复启动自动 KILL 旧实例同端口重启。
+- 新增 ShutdownTest 端点测试（起 server → POST shutdown → serve_forever 退出）；453 passed，verify 13/13、audit 通过；退出按钮 playwright 实测（进程退出、端口关闭）。
+
+#### 迁移影响
+- 面板进程管理闭环：启动（命令/双击 bat）→ 退出（按钮/关窗/同端口重启）；无既有行为变更。
+
+### instance_id 机械化获取（消除人工转录）
 #### 变更内容
 - `dispatch --watch` 落盘输出行附带 `session=<session_id>`（从 session-binding.json 轻量读取），上层编排可直接复制，不再人工读 JSON 转录。
 - 新增只读子命令 `python scripts/ocsr_dispatch.py session-id --worker-dir <dir>`：输出 session_id，缺失/非法 fail-closed exit 2，供脚本化取用。
