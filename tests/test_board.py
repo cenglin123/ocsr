@@ -645,5 +645,30 @@ class StateCacheTest(unittest.TestCase):
             self.assertEqual({"late": "组"}, payload["assignments"])
 
 
+class ShutdownTest(unittest.TestCase):
+    def test_shutdown_stops_server(self):
+        class Handler(board.BoardHandler):
+            pass
+
+        Handler.groups_path = Path(tempfile.gettempdir()) / "ocsr-test-shutdown-cfg.json"
+        Handler.base_root = Path(tempfile.gettempdir()) / "ocsr-test-shutdown-base"
+        Handler.base_root.mkdir(exist_ok=True)
+        Handler.cli_roots = []
+        Handler.log_path = Handler.base_root / "no-log.jsonl"
+        server = board.BoardServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/shutdown",
+                                     data=b"{}", method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self.assertEqual(200, resp.status)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())  # serve_forever 已退出
+        server.server_close()
+        Handler.groups_path.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()

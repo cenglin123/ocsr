@@ -31,6 +31,8 @@ python scripts/verify_ocsr_skill.py
 python scripts/ocsr_board.py   # 127.0.0.1:8787，自动开浏览器
 ```
 
+也可双击仓库根 `启动面板.bat`（关闭控制台窗口即退出）。按需启动、无需常驻：无浏览器打开时零 CPU；工具栏「⏻ 退出」按钮优雅关闭进程；重复启动会自动 KILL 旧实例同端口重启，不会堆积。
+
 本地面板展示各派发 worker 的状态、时长、session ID，支持按工作目录分组、拖动分组、点击 chips/时间/模型/关键字筛选、组折叠/聚焦/整组隐藏、时间排序与卡片/列表视图切换、失败原因直显与扫描目录在线管理；只读既有证据文件，不参与派发机制。详见 [docs/deployment.md](docs/deployment.md)。
 
 ## 验证

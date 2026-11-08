@@ -143,6 +143,7 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
   <input id="new-group" placeholder="新分组名（回车）" size="14">
   <button id="btn-refresh" title="强制重扫（绕过服务端缓存）">⟳ 刷新</button>
   <button id="btn-roots">⚙ 扫描目录</button>
+  <button id="btn-shutdown" title="优雅退出面板进程" style="color:var(--red)">⏻ 退出</button>
   <button id="btn-archive-done" title="把当前筛选结果中所有已结束（非进行中）的卡片归档，可在「已归档」中恢复">归档已结束</button>
   <button id="btn-show-hidden" title="查看/恢复已归档的卡片与组">已归档 (0)</button>
   <span class="meta" id="meta"></span>
@@ -581,6 +582,11 @@ $("view-mode").addEventListener("input",()=>{savePref("ocsr-board-view",$("view-
 $("sort-by").value=loadPref("ocsr-board-sort","started_desc");
 $("view-mode").value=loadPref("ocsr-board-view","cards");
 $("btn-refresh").addEventListener("click",()=>load(true));
+$("btn-shutdown").addEventListener("click",async()=>{
+  if(!confirm("退出面板？（只关闭面板进程，不影响任何 OCSR worker）"))return;
+  try{await fetch("/api/shutdown",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch(e){}
+  document.body.innerHTML='<div style="padding:40px;color:#8a8a8a;font:14px monospace">面板已退出。重新启动：python scripts/ocsr_board.py 或双击 启动面板.bat</div>';
+});
 // 自适应轮询：有进行中的 worker 时 5s，否则 15s；服务端另有 10s 扫描缓存
 let pollMs=5000;
 async function poll(){

@@ -661,6 +661,11 @@ class BoardHandler(BaseHTTPRequestHandler):
             self._json({"error": f"config io error: {exc}"}, 500)
 
     def _do_post(self) -> None:
+        if self.path == "/api/shutdown":
+            # 优雅退出：先回响应，再异步关闭 server（仅本机回环 + application/json）
+            self._json({"ok": True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         if self.path == "/api/roots":
             try:
                 data = self._read_json_body()
