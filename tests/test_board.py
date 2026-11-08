@@ -135,6 +135,14 @@ class ScanTest(unittest.TestCase):
                     for w in board.scan_workers(root, days=0)}
             self.assertEqual(2, len(keys))  # 同名 dispatch/label 在不同根下不碰撞
 
+    def test_model_id_with_colon_tag(self):
+        # 模型 ID 含 :/@ 时不得被截断（与 dispatcher 的取参一致）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_dispatch(root, model="zhipuai/glm-5.3-flash:nightly")
+            w = board.scan_workers(root, days=0)[0]
+            self.assertEqual("zhipuai/glm-5.3-flash:nightly", w["model"])
+
 
 class HistoryTest(unittest.TestCase):
     def test_tail_and_bad_lines(self):
@@ -208,6 +216,7 @@ class HistoryTest(unittest.TestCase):
             self.assertEqual("clean", workers[0]["read_audit"])
 
     def test_only_reported_rows_do_not_bind(self):
+        # 真正的中间行（reported:running）不是最终状态：不绑定 wall/artifact
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             now = datetime.now().astimezone()
@@ -219,6 +228,27 @@ class HistoryTest(unittest.TestCase):
             board.attach_telemetry(workers, hist)
             self.assertIsNone(workers[0]["wall_min"])
             self.assertIsNone(workers[0]["artifact_bytes"])
+            self.assertEqual("", workers[0]["outcome_detail"])
+
+    def test_handoff_required_terminal_row_binds(self):
+        # BR-B1：reported:handoff_required 是总期限交回的终态行（非中间行），
+        # 应参与绑定且 outcome_detail 原样保留；徽章仍以 worker-state 终态为准
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime.now().astimezone()
+            make_dispatch(root, state="timed_out", exit_code=0,
+                          captured_at=(now - timedelta(hours=1)).timestamp())
+            workers = board.scan_workers(root, days=0)
+            self.assertEqual("timeout", workers[0]["badge"])
+            hist = [{"label": "w1", "ts": now.isoformat(),
+                     "outcome_detail": "reported:handoff_required",
+                     "wall_min": 42.0, "artifact_bytes": 87654}]
+            board.attach_telemetry(workers, hist)
+            self.assertEqual(42.0, workers[0]["wall_min"])
+            self.assertEqual(87654, workers[0]["artifact_bytes"])
+            self.assertEqual("reported:handoff_required",
+                             workers[0]["outcome_detail"])
+            self.assertEqual("timeout", workers[0]["badge"])
 
     def test_malformed_telemetry_fields_tolerated(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -234,6 +264,37 @@ class HistoryTest(unittest.TestCase):
             board.attach_telemetry(workers, hist)  # 不应抛 TypeError/AttributeError
             self.assertEqual(7.0, workers[0]["wall_min"])
 
+    def test_non_string_label_tolerated_in_state_build(self):
+        # L2：遥测行 "label": [] 等非字符串值在 read_history 被过滤、worker-state
+        # label 异常时以目录名兜底，attach_telemetry/build_state 不抛 TypeError
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            class H:
+                groups_path = root / "cfg.json"
+                base_root = root / "base"
+                cli_roots: list = []
+                days = 0
+                log_path = root / "log.jsonl"
+
+            H.base_root.mkdir()
+            wd = make_dispatch(H.base_root)
+            state_doc = json.loads((wd / "worker-state.json").read_text(encoding="utf-8"))
+            state_doc["label"] = ["bad"]  # 非字符串 label：扫描侧应回退目录名
+            (wd / "worker-state.json").write_text(json.dumps(state_doc), encoding="utf-8")
+            now = datetime.now().astimezone().isoformat()
+            rows = [
+                {"label": [], "ts": now, "outcome_detail": "success:completed", "wall_min": 1.0},
+                {"label": "w1", "ts": now, "outcome_detail": "success:completed", "wall_min": 7.0},
+            ]
+            H.log_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                                  encoding="utf-8")
+            payload = board.build_state(H, force=True)
+            self.assertEqual(1, len(payload["workers"]))
+            w = payload["workers"][0]
+            self.assertEqual("w1", w["label"])  # 目录名兜底
+            self.assertEqual(7.0, w["wall_min"])  # 合法行正常绑定，[] 行被过滤
+
     def test_landed_not_overridden_by_telemetry_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -243,6 +304,43 @@ class HistoryTest(unittest.TestCase):
                      "outcome_detail": "error:exit_0_no_artifact"}]
             board.attach_telemetry(workers, hist)
             self.assertEqual("landed", workers[0]["badge"])
+
+    def test_telemetry_upper_bound_next_run(self):
+        # B1：旧 worker 区间内无终态行时，同 label 下一次运行的 error:* 行
+        # 不得越界绑定——徽章不被改写为 failed、wall_min 不被覆盖
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime.now().astimezone()
+            make_dispatch(root, name="ocsr_dispatch_20261107_100000_aaaaaaaa",
+                          state="launched", exit_code=0,
+                          captured_at=(now - timedelta(hours=2)).timestamp())
+            make_dispatch(root, name="ocsr_dispatch_20261107_120000_bbbbbbbb",
+                          state="launched", exit_code=None,
+                          captured_at=(now - timedelta(minutes=30)).timestamp())
+            workers = board.scan_workers(root, days=0)
+            workers.sort(key=lambda w: w["started_at"])
+            old, new = workers
+            hist = [{"label": "w1", "ts": (now - timedelta(minutes=10)).isoformat(),
+                     "outcome_detail": "error:exit_0_no_artifact", "wall_min": 3.0}]
+            board.attach_telemetry(workers, hist)
+            self.assertEqual("stale", old["badge"])
+            self.assertIsNone(old["wall_min"])
+            self.assertEqual("", old["outcome_detail"])
+            self.assertEqual("failed", new["badge"])  # 新运行自身区间内正常绑定
+            self.assertEqual(3.0, new["wall_min"])
+
+    def test_telemetry_stall_timeout_promotes_to_timeout(self):
+        # S3：dispatcher 超时遥测是 stall:watchdog-timeout / killed:harness-timeout，
+        # active/stale worker 据此校正为 timeout 徽章
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_dispatch(root, state="launched", exit_code=0)
+            workers = board.scan_workers(root, days=0)
+            self.assertEqual("stale", workers[0]["badge"])
+            hist = [{"label": "w1", "ts": datetime.now().astimezone().isoformat(),
+                     "outcome_detail": "stall:watchdog-timeout", "wall_min": 3.0}]
+            board.attach_telemetry(workers, hist)
+            self.assertEqual("timeout", workers[0]["badge"])
 
 
 class GroupsTest(unittest.TestCase):
@@ -395,11 +493,16 @@ class PortTest(unittest.TestCase):
 
 
 class HttpApiTest(unittest.TestCase):
-    """真实 BoardServer + urllib 的端点契约测试（独立配置与根，不碰本机数据）。"""
+    """真实 BoardServer + urllib 的端点契约测试（独立配置与根，不碰本机数据）。
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
+    全类共享一个 server：Windows 下逐用例起停 server 存在间歇性连接中断
+    （WinError 10053）竞态窗口；每个用例仅重置配置文件与扫描缓存。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
 
         class Handler(board.BoardHandler):
             pass
@@ -410,16 +513,22 @@ class HttpApiTest(unittest.TestCase):
         Handler.cli_roots = []
         Handler.days = 0
         Handler.log_path = root / "dispatch-log.jsonl"
-        self.server = board.BoardServer(("127.0.0.1", 0), Handler)
-        self.port = self.server.server_address[1]
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        cls.server = board.BoardServer(("127.0.0.1", 0), Handler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
 
-    def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
-        self.tmp.cleanup()
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        board._STATE_CACHE.update(at=0.0, payload=None)  # 隔离其他测试类遗留的扫描缓存
+        # 每个用例独立配置文件，避免 roots/assignments 串扰
+        self.server.RequestHandlerClass.groups_path.unlink(missing_ok=True)
 
     def _post(self, path, payload, content_type="application/json", host=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
