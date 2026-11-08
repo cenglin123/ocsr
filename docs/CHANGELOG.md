@@ -2,6 +2,19 @@
 
 ## 2026-11-08
 
+### 派发目录解耦与面板自动发现（handoff）
+
+#### 变更内容
+- **解耦**：派发目录默认放 TEMP（新增 --dispatch-root 显式覆盖父目录）；--work-dir 明确为 worker 执行目录（opencode 位置参数目录 + launcher Set-Location，默认 dispatcher cwd）。派发证据不再落进 git 工作树；--work-dir <worktree> 让 worker 在工作树改代码真正生效。
+- **自动发现**：dispatcher 启动派发时把派发目录父目录登记到 ~/.ocsr/dispatch-roots.json（驱动器写、面板只读）；面板扫描根并入登记根（近 30 天、存在目录、失效/超期跳过）；登记根在面板可「忽略」（只改面板配置，不改驱动器文件）。
+- **实证**：opencode 只把 git 项目目录识别为工作目录（非 git 目录回退到当前项目）；真实派发验证派发目录在 dispatch-root、worker cwd=--work-dir（git 目录）、登记写入、面板自动显示。
+- fresh 复查（deepseek/deepseek-flash）REVISE，12 项发现全部修复：launcher 真正 Set-Location + 位置参数目录接线（F1 核心）、resume-material 与实际目录一致、登记非 dict 容错、并发登记唯一临时名与警告、naive 时间戳与口径统一、登记根忽略逃生口、测试真实 cwd 断言与隔离、跨子命令语义区分等。
+- 7 项新增离线测试；479 passed 全仓；verify 13/13、audit 通过。
+
+#### 迁移影响
+- --work-dir 语义从「派发目录父目录」明确为「worker 执行目录」；派发目录位置由 --dispatch-root/TEMP 决定。converge_loop/dsh 不使用 --work-dir，无影响；--resume-from 按绝对路径定位不变。
+- 面板可写文件为 board-groups.json 与 board.lock；登记文件 dispatch-roots.json 由驱动器写。
+
 ### Board 性能：增量扫描与生命周期管理
 #### 变更内容
 - **增量扫描**：worker 目录以关键文件（worker-state/session-binding/start.marker/launcher.ps1/run.log）的 mtime+size 指纹缓存解析结果，内容未变不重读（进行中时长与 deadline 滞留判定仍每次重算）；dispatch-log.jsonl 记住偏移只解析新增完整行（不完整尾行留待下次，截断则全量重读）；缓存随扫描集淘汰。
@@ -27,8 +40,7 @@
 #### 迁移影响
 - 面板进程管理闭环：启动（命令/双击 bat）→ 退出（按钮/关窗/同端口重启）；无既有行为变更。
 
-### instance_id 机械化获取（消除人工转录）
-#### 变更内容
+### instance_id 机械化获取（消除人工转录）#### 变更内容
 - `dispatch --watch` 落盘输出行附带 `session=<session_id>`（从 session-binding.json 轻量读取），上层编排可直接复制，不再人工读 JSON 转录。
 - 新增只读子命令 `python scripts/ocsr_dispatch.py session-id --worker-dir <dir>`：输出 session_id，缺失/非法 fail-closed exit 2，供脚本化取用。
 - 动机：2026-11-08 converge 流程三次人工转录错误导致归档 ledger-instance-conflict，且 instance_id 属 Archive Contract 不可修正字段。工具化消除该类失误（硬约束优先于纪律提醒）。

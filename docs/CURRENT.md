@@ -4,6 +4,7 @@
 
 ## 当前状态
 
+- 派发目录解耦与面板自动发现（handoff）已落地：派发目录默认 TEMP（--dispatch-root 覆盖），--work-dir 明确为 worker 执行目录（launcher Set-Location + opencode 位置参数目录，git 工作树实证生效）；dispatcher 启动登记 dispatch-roots.json，面板自动并入（失效/超期跳过、可忽略）。479 passed 全仓，verify 13/13、audit、diff/eol 通过；真实派发验证解耦与自动发现，交接现场样本只读确认。fresh reviewer（deepseek-flash）REVISE，12 项发现全部修复（含 F1 的 launcher 目录接线实证）；报告 `.review/dispatch-root-decouple-20261108/`。预算 6 次真实调用（1 preflight + 2 验证派发 + 1 复查 + 2 cwd 实证），逐段披露。
 - Board 性能与生命周期（handoff 20261108-ocsr-board-perf）：增量扫描（目录指纹 + 日志偏移）+ 目录名先过滤再 IO（scan_workers 2.43s→0.43s）；单实例锁文件（board.lock）重复启动 KILL 重启；--idle-timeout 空闲自动退出（默认 30 分钟）。470 passed（462+8 含 fresh 复查修复），verify 13/13、audit、diff/eol 通过；前后对比、单实例重启、空闲退出均实测。fresh reviewer（deepseek-flash）REVISE，8 项发现全部修复（多根缓存互清、日志替换混合、KILL 时机与守卫、测试假阳性等）；报告 `.review/board-incremental-20261108/`。预算 2/2。
 - Board 使用性闭环：新增「⏻ 退出」按钮（/api/shutdown 优雅关进程，confirm 防误点）与仓库根 `启动面板.bat`（双击启动、关窗即退）。按需启动不必常驻；无页面时零 CPU。453 passed（452+1），verify 13/13、audit、diff/eol 通过；退出按钮 playwright 实测（进程退出、端口关闭）；本机测试残留面板实例已清理。
 - instance_id 机械化获取已落地：dispatch --watch 落盘输出带 `session=` 字段；新增只读 `session-id --worker-dir` 子命令（缺失/非法 fail-closed exit 2）。消除 converge 落账的人工转录失误（三次实证致归档冲突且不可修正）。452 passed（448+4），verify 13/13、audit、diff/eol 通过；真实 worker 目录实测正确输出 session_id。

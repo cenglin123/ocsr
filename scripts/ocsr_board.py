@@ -5,6 +5,7 @@
   worker-state.json / session-binding.json / start.marker / launcher.ps1
 - 历史：~/.ocsr/dispatch-log.jsonl 尾部
 - 扫描根 = 默认 TEMP + CLI --work-dir + 面板「扫描目录」里在线增删的自定义根
+  + 驱动器在派发时登记的派发根（~/.ocsr/dispatch-roots.json，近 30 天、存在目录）
 面板自身可写文件仅两个（均在 ~/.ocsr/）：board-groups.json（手动分组与自定义
 扫描根配置）与 board.lock（单实例锁，退出时清除）。
 
@@ -40,6 +41,7 @@ PORT_PROBE_LIMIT = 10  # 占用时探测 8788..8797
 OCSR_HOME = Path.home() / ".ocsr"  # 与 dispatcher 的 DISPATCH_LOG 一致，不随 OCSR_HOME 环境变量分叉
 DISPATCH_LOG = OCSR_HOME / "dispatch-log.jsonl"
 GROUPS_PATH = OCSR_HOME / "board-groups.json"
+DISPATCH_ROOTS_REGISTRY = OCSR_HOME / "dispatch-roots.json"  # 驱动器登记的派发根（只读）
 INDEX_HTML = Path(__file__).resolve().parent / "board" / "index.html"
 LOCK_PATH = OCSR_HOME / "board.lock"
 _LAST_ACTIVITY = {"at": time.monotonic()}  # 有页面在看的最近请求时间（驱动空闲退出）
@@ -430,7 +432,11 @@ def load_config(path: Path = GROUPS_PATH) -> dict[str, Any]:
     if not isinstance(roots, list):
         roots = []
     roots = [r for r in roots if isinstance(r, str) and r]
-    return {"assignments": assignments, "roots": roots}
+    ignored = data.get("ignored_roots")
+    if not isinstance(ignored, list):
+        ignored = []
+    ignored = [r for r in ignored if isinstance(r, str) and r]
+    return {"assignments": assignments, "roots": roots, "ignored_roots": ignored}
 
 
 def load_assignments(path: Path = GROUPS_PATH) -> dict[str, str]:
@@ -475,15 +481,49 @@ def save_assignment(key: str, group: str, path: Path = GROUPS_PATH) -> dict[str,
         return assignments
 
 
+def registered_dispatch_roots() -> list[Path]:
+    """读驱动器登记的派发根（~/.ocsr/dispatch-roots.json）：近 30 天且仍存在。"""
+    roots = _load_json(DISPATCH_ROOTS_REGISTRY).get("roots")
+    if not isinstance(roots, list):
+        return []
+    now = datetime.now().astimezone()
+    out: list[Path] = []
+    for r in roots:
+        if not isinstance(r, dict):
+            continue
+        raw = r.get("path")
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            last = datetime.fromisoformat(str(r.get("last_used", "")))
+            if last.tzinfo is None:
+                last = last.astimezone()  # naive 时间戳按本地时区解释，不与 aware 相减抛 TypeError
+        except (ValueError, TypeError):
+            continue
+        if last < now - timedelta(days=30):  # 与 dispatcher 的 cutoff 口径一致
+            continue
+        p = Path(raw)
+        try:
+            if p.is_dir():
+                out.append(p)
+        except OSError:
+            continue
+    return out
+
+
 def effective_roots(base: Path, path: Path = GROUPS_PATH,
                     extra: list[Path] | None = None) -> list[Path]:
-    """默认 TEMP + CLI --work-dir + 配置里额外添加且仍存在的扫描根（去重，保持顺序）。"""
+    """默认 TEMP + CLI --work-dir + 配置自定义根 + 驱动器登记的派发根
+    （去重、跳过不存在目录）。登记机制让任意 --dispatch-root 的派发自动可见。"""
     base_resolved = str(base.resolve())
+    ignored = set(load_config(path)["ignored_roots"])
     roots = [base]
     seen = {base_resolved}
-    for p in list(extra or []) + [Path(r) for r in load_config(path)["roots"]]:
+    for p in list(extra or []) + [Path(r) for r in load_config(path)["roots"]] + registered_dispatch_roots():
         try:
             resolved = str(p.resolve())
+            if resolved in ignored:
+                continue  # 用户显式忽略的根（含登记根）不扫描
             if p.is_dir() and resolved not in seen:
                 roots.append(p)
                 seen.add(resolved)
@@ -516,6 +556,14 @@ def mutate_roots(action: str, raw_path: Any, base: Path,
             if raw_path.strip() not in roots:
                 return [], "只能移除额外添加的扫描根"
             roots.remove(raw_path.strip())
+        elif action in ("ignore", "unignore"):
+            # 登记根/任意根的可忽略逃生口：只改面板配置，不改驱动器登记文件
+            resolved = str(p.resolve())
+            ignored = config["ignored_roots"]
+            if action == "ignore" and resolved not in ignored:
+                ignored.append(resolved)
+            elif action == "unignore" and resolved in ignored:
+                ignored.remove(resolved)
         else:
             return [], "未知 action"
         _write_config(config, path)
@@ -689,13 +737,16 @@ def build_state(handler: "BoardHandler", force: bool = False) -> dict[str, Any]:
                     del _WORKER_CACHE[key]
             history = read_history(handler.log_path)
             attach_telemetry(workers, history)
+            registered = {str(p.resolve()) for p in registered_dispatch_roots()}
             payload = {
                 "workers": workers,
                 "history": history,
                 "assignments": cfg["assignments"],
                 "roots": [{"path": str(r), "kind": "default" if r == handler.base_root
-                           else ("cli" if r in handler.cli_roots else "custom")}
+                           else ("cli" if r in handler.cli_roots
+                                 else ("registered" if str(r.resolve()) in registered else "custom"))}
                           for r in roots],
+                "ignored_roots": cfg["ignored_roots"],
                 # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
                 "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
                 "generated_at": datetime.now().astimezone().isoformat(),
