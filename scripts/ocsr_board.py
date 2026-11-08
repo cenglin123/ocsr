@@ -5,6 +5,7 @@
   worker-state.json / session-binding.json / start.marker / launcher.ps1
 - 历史：~/.ocsr/dispatch-log.jsonl 尾部
 - 扫描根 = 默认 TEMP + CLI --work-dir + 面板「扫描目录」里在线增删的自定义根
+  + 驱动器在派发时登记的派发根（~/.ocsr/dispatch-roots.json，近 30 天、存在目录）
 面板自身可写文件仅两个（均在 ~/.ocsr/）：board-groups.json（手动分组与自定义
 扫描根配置）与 board.lock（单实例锁，退出时清除）。
 
@@ -40,6 +41,7 @@ PORT_PROBE_LIMIT = 10  # 占用时探测 8788..8797
 OCSR_HOME = Path.home() / ".ocsr"  # 与 dispatcher 的 DISPATCH_LOG 一致，不随 OCSR_HOME 环境变量分叉
 DISPATCH_LOG = OCSR_HOME / "dispatch-log.jsonl"
 GROUPS_PATH = OCSR_HOME / "board-groups.json"
+DISPATCH_ROOTS_REGISTRY = OCSR_HOME / "dispatch-roots.json"  # 驱动器登记的派发根（只读）
 INDEX_HTML = Path(__file__).resolve().parent / "board" / "index.html"
 LOCK_PATH = OCSR_HOME / "board.lock"
 _LAST_ACTIVITY = {"at": time.monotonic()}  # 有页面在看的最近请求时间（驱动空闲退出）
@@ -475,13 +477,42 @@ def save_assignment(key: str, group: str, path: Path = GROUPS_PATH) -> dict[str,
         return assignments
 
 
+def registered_dispatch_roots() -> list[Path]:
+    """读驱动器登记的派发根（~/.ocsr/dispatch-roots.json）：近 30 天且仍存在。"""
+    roots = _load_json(DISPATCH_ROOTS_REGISTRY).get("roots")
+    if not isinstance(roots, list):
+        return []
+    now = datetime.now().astimezone()
+    out: list[Path] = []
+    for r in roots:
+        if not isinstance(r, dict):
+            continue
+        raw = r.get("path")
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            last = datetime.fromisoformat(str(r.get("last_used", "")))
+        except ValueError:
+            continue
+        if (now - last).days > 30:
+            continue
+        p = Path(raw)
+        try:
+            if p.is_dir():
+                out.append(p)
+        except OSError:
+            continue
+    return out
+
+
 def effective_roots(base: Path, path: Path = GROUPS_PATH,
                     extra: list[Path] | None = None) -> list[Path]:
-    """默认 TEMP + CLI --work-dir + 配置里额外添加且仍存在的扫描根（去重，保持顺序）。"""
+    """默认 TEMP + CLI --work-dir + 配置自定义根 + 驱动器登记的派发根
+    （去重、跳过不存在目录）。登记机制让任意 --dispatch-root 的派发自动可见。"""
     base_resolved = str(base.resolve())
     roots = [base]
     seen = {base_resolved}
-    for p in list(extra or []) + [Path(r) for r in load_config(path)["roots"]]:
+    for p in list(extra or []) + [Path(r) for r in load_config(path)["roots"]] + registered_dispatch_roots():
         try:
             resolved = str(p.resolve())
             if p.is_dir() and resolved not in seen:

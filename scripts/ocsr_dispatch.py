@@ -58,6 +58,50 @@ DEFAULT_MAX_RENEWALS = 1  # 检查期限后的有限续期次数；总期限仍�
 MAX_ATTEMPTS = 3          # 与 SKILL.md 的每 worker 失败重试总尝试上限一致
 MAX_REWORKS = 3           # 返工接续轮数上限（与失败重试分开计数）
 DISPATCH_LOG = Path.home() / ".ocsr" / "dispatch-log.jsonl"
+DISPATCH_ROOTS_REGISTRY = Path.home() / ".ocsr" / "dispatch-roots.json"  # 派发根登记（驱动器写、面板只读）
+
+
+def _resolve_dispatch_base(dispatch_root: Path | None) -> Path:
+    """派发目录父目录：--dispatch-root 或默认 TEMP（不随 --work-dir 落进工作树）。"""
+    return Path(dispatch_root) if dispatch_root else Path(os.environ.get("TEMP", "/tmp"))
+
+
+def _resolve_execution_dir(work_dir: Path | None) -> Path:
+    """worker 执行目录（opencode --dir）：--work-dir 或默认 dispatcher 当前目录。"""
+    return Path(work_dir) if work_dir else Path.cwd()
+
+
+def _register_dispatch_root(base: Path) -> None:
+    """启动派发时把派发目录父目录登记到 ~/.ocsr/dispatch-roots.json。
+
+    面板把登记过的派发根并入扫描（自动发现任意 --dispatch-root 的派发）。
+    只保留近 30 天使用过的根；登记失败不影响派发。
+    """
+    try:
+        path = DISPATCH_ROOTS_REGISTRY
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        roots = data.get("roots") if isinstance(data.get("roots"), list) else []
+        now = datetime.datetime.now().astimezone()
+        resolved = str(base.resolve())
+        roots = [r for r in roots if isinstance(r, dict) and r.get("path") != resolved]
+        roots.append({"path": resolved, "last_used": now.isoformat()})
+        cutoff = now - datetime.timedelta(days=30)
+        kept = []
+        for r in roots:
+            try:
+                if datetime.datetime.fromisoformat(str(r.get("last_used", ""))) >= cutoff:
+                    kept.append(r)
+            except (ValueError, TypeError):
+                continue
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"roots": kept}, ensure_ascii=False, indent=1) + "\n",
+                       encoding="utf-8", newline="\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass  # 登记失败不影响派发
 CONVERGE_LEDGER_NAME = "ocsr-dispatch-ledger.jsonl"  # 入库账本（随收敛证据一起提交）
 # dispatch 退出码契约（单一事实源见 refs/dispatch-patterns.md §退出码契约）
 #   0 = 全部 worker 落盘
@@ -1634,6 +1678,7 @@ def _dispatch_batch(
     *,
     output_dir: Path,
     work_dir: Path | None = None,
+    dispatch_root: Path | None = None,
     stagger: int = DEFAULT_STAGGER,
     timeout_min: int = DEFAULT_TIMEOUT,
     timeout_policy: str = TIMEOUT_POLICY_AUTO,
@@ -1727,12 +1772,15 @@ def _dispatch_batch(
     if progress and ledger is not None:
         print(f"[ocsr] 派发账本: {ledger}")
 
-    # 创建工作目录（加 uuid4 后缀防同秒碰撞）
+    # 派发目录与 worker 执行目录解耦：派发目录默认放 TEMP（或 --dispatch-root），
+    # 不随 --work-dir 落进 git 工作树（避免 launcher/日志污染 diff）；
+    # --work-dir 只作 worker 的执行目录（opencode --dir）。
     import uuid
-    base = Path(work_dir) if work_dir else Path(os.environ.get("TEMP", "/tmp"))
+    base = _resolve_dispatch_base(dispatch_root)
     batch_id = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     batch_dir = base / f"ocsr_dispatch_{batch_id}"
     batch_dir.mkdir(parents=True, exist_ok=True)
+    _register_dispatch_root(base)
 
     # 为每个 worker 生成 launcher
     work_dirs: list[Path] = []
@@ -1807,7 +1855,7 @@ def _dispatch_batch(
         (wd / "start.marker").write_text(
             f"pwsh started {datetime.datetime.now().astimezone().isoformat()}\n", encoding="utf-8")
         parsed[i]["work_dir"] = wd
-        parsed[i]["execution_dir"] = Path.cwd()
+        parsed[i]["execution_dir"] = _resolve_execution_dir(work_dir)  # worker 执行目录 = --work-dir（默认 dispatcher cwd）
         launched_row: dict[str, object] = {
             "event": "launched",
             "batch_id": batch_id,
@@ -2058,6 +2106,7 @@ def cmd_dispatch(args) -> int:
         parsed,
         output_dir=output_dir,
         work_dir=Path(args.work_dir) if args.work_dir else None,
+        dispatch_root=Path(args.dispatch_root) if getattr(args, "dispatch_root", None) else None,
         stagger=stagger,
         timeout_min=timeout_min,
         timeout_policy=timeout_policy,
@@ -3499,7 +3548,8 @@ def main():
                              f"{TIMEOUT_POLICY_LEAF_KILL}=到期 kill 进程，"
                              f"{TIMEOUT_POLICY_HIERARCHICAL_REPORT}=报告/alive 保留进程供 commander 裁决")
     p_disp.add_argument("--progress", action="store_true", help="输出细粒度过程信息（已就绪/错峰/恢复交回等；启动、落盘、失败、超时等关键生命周期行默认输出）")
-    p_disp.add_argument("--work-dir", help="临时工作目录 (默认 $TEMP)")
+    p_disp.add_argument("--work-dir", help="worker 执行目录（opencode --dir，默认 dispatcher 当前目录）；派发目录位置由 --dispatch-root 决定")
+    p_disp.add_argument("--dispatch-root", help="派发目录父目录（默认 $TEMP）；仅影响 launcher/日志等证据的存放位置")
     p_disp.add_argument("--diagnostic-session-db", help="显式只读查询 OpenCode v2 会话元数据；仅诊断，不参与续期/恢复裁决")
     p_disp.add_argument("--harness", default="cli",
                         help="派发 harness 标识 (遥测归因用，默认 cli)")

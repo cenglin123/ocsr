@@ -1936,6 +1936,7 @@ class TestForbidBlockInjection:
             args.watch = False
             args.progress = False
             args.work_dir = td
+            args.dispatch_root = td  # 派发目录父目录显式指定（与 worker cwd 解耦）
             args.harness = "test"
             args.meta = []
             args.ledger_dir = None
@@ -1979,6 +1980,7 @@ class TestForbidBlockInjection:
             args.watch = False
             args.progress = False
             args.work_dir = td
+            args.dispatch_root = td  # 派发目录父目录显式指定（与 worker cwd 解耦）
             args.harness = "test"
             args.meta = []
             args.ledger_dir = None

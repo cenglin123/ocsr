@@ -12,6 +12,8 @@ SPEC = importlib.util.spec_from_file_location("ocsr_board_inc", BOARD_PATH)
 board = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(board)
+# 测试环境隔离：登记根默认指向不存在路径（避免本机真实 dispatch-roots.json 串扰）
+board.DISPATCH_ROOTS_REGISTRY = Path(tempfile.gettempdir()) / "ocsr-test-no-roots.json"
 
 
 def make_worker(root: Path, label="w1", state="landed"):
@@ -293,6 +295,34 @@ class MultiRootCacheTest(unittest.TestCase):
             board.build_state(H)
             self.assertEqual(2, len(board._WORKER_CACHE))
             board._WORKER_CACHE.clear()
+
+
+class RegisteredRootsTest(unittest.TestCase):
+    def test_registered_roots_merged_and_filtered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reg = root / "dispatch-roots.json"
+            extra = root / "custom-dispatch"
+            extra.mkdir()
+            reg.write_text(json.dumps({"roots": [
+                {"path": str(extra), "last_used": datetime.now().astimezone().isoformat()},
+                {"path": "C:/gone-xyz", "last_used": datetime.now().astimezone().isoformat()},
+                {"path": str(extra), "last_used": (datetime.now().astimezone() - timedelta(days=40)).isoformat()},
+                {"path": 123, "last_used": "bad"},
+            ]}), encoding="utf-8")
+            base = root / "base"
+            base.mkdir()
+            cfg = root / "cfg.json"
+            with patch.object(board, "DISPATCH_ROOTS_REGISTRY", reg):
+                roots = board.effective_roots(base, cfg)
+            self.assertIn(extra, roots)
+            self.assertEqual(2, len(roots))  # base + extra；不存在/超期/非法均跳过
+
+    def test_missing_registry_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(board, "DISPATCH_ROOTS_REGISTRY", root / "none.json"):
+                self.assertEqual([], board.registered_dispatch_roots())
 
 
 if __name__ == "__main__":
