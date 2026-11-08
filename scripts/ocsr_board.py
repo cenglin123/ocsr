@@ -43,7 +43,7 @@ GROUPS_PATH = OCSR_HOME / "board-groups.json"
 INDEX_HTML = Path(__file__).resolve().parent / "board" / "index.html"
 
 DIR_NAME_RE = re.compile(r"^ocsr_dispatch_(\d{8})_(\d{6})_[0-9a-f]+$")
-MODEL_RE = re.compile(r"\s-m\s+([\w./-]+)")
+MODEL_RE = re.compile(r"\s-m\s+(\S+)")
 EXIT_RE = re.compile(r"^exit=(\d+)$")
 
 # worker-state.json 的显式终态（见 ocsr_dispatch.py 写入点）；
@@ -148,9 +148,12 @@ def scan_worker_dir(wd: Path, dispatch_name: str, started: datetime | None,
 
     # key 含扫描根短哈希：不同根下同名 dispatch/label 不共享隐藏/分组状态
     root_tag = hashlib.sha1(str(root.resolve()).encode("utf-8")).hexdigest()[:8] if root else ""
+    label = state.get("label")
+    if not isinstance(label, str) or not label:
+        label = wd.name  # 非字符串或空 label 用目录名兜底，避免绑定阶段按字典键抛错
     return {
         "key": f"{root_tag}/{dispatch_name}/{wd.name}" if root_tag else f"{dispatch_name}/{wd.name}",
-        "label": state.get("label") or wd.name,
+        "label": label,
         "dir": str(wd),
         "state": raw_state,
         "badge": badge,
@@ -218,8 +221,12 @@ def read_history(log_path: Path, limit: int = 200, tail_bytes: int = 2_000_000) 
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(entry, dict) and entry.get("label"):
-            records.append(entry)
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get("label")
+        if not isinstance(label, str) or not label:
+            continue  # 非字符串或空 label 会让 attach_telemetry 的字典键抛 TypeError
+        records.append(entry)
     return records[-limit:]
 
 
@@ -240,47 +247,68 @@ def _ts_key(rec: dict[str, Any]) -> float:
 def attach_telemetry(workers: list[dict[str, Any]], history: list[dict[str, Any]]) -> None:
     """补全 wall_min/产物等。同 label 可能串行多次运行、且一次运行可能写多条
     遥测（hierarchical_report 先写 reported 中间行、后写终态行）。规则：
-    在「不早于该 worker 启动」的候选中取最早一条**终态行**（非 reported:），
-    既不串到下一次运行，也不把中间行的检查时刻时长/log 大小当成最终值。
-    无终态行则不绑定（保留目录证据原样）。遥测 error/timeout 校正徽章。"""
+    同 label 的 workers 按 started_ts 排序，每个 worker 的候选区间为
+    [started_ts, 同 label 下一个 worker 的 started_ts)，归属区间互不重叠——
+    旧 worker 不会被同 label 下一次运行的终态行越界绑定；区间内取最早一条
+    **终态行**，既不串到上一次运行，也不把中间行的检查时刻时长/log 大小当成
+    最终值。终态行 = 非 reported: 前缀，或 reported:handoff_required——后者
+    是 dispatcher 走到不可变总期限、hierarchical_report 交回上层时写的终态
+    遥测，参与绑定；其余 reported:<status> 才是中间行，跳过。无 started_at
+    或区间内无终态行的 worker 不绑定（保留目录证据原样）。遥测 error/timeout
+    校正徽章。"""
     by_label: dict[str, list[dict[str, Any]]] = {}
     for rec in history:
         by_label.setdefault(rec.get("label", ""), []).append(rec)
     for recs in by_label.values():
         recs.sort(key=_ts_key)
+
+    # 同 label 的 worker 依启动时间排序，构成互不重叠的归属区间
+    ws_by_label: dict[str, list[tuple[float, dict[str, Any]]]] = {}
     for w in workers:
-        cands = by_label.get(w["label"], [])
-        if not cands:
-            continue
         started = _parse_iso(w.get("started_at"))
-        started_ts = started.timestamp() if started else None
-        best = None
-        for rec in cands:
-            ts = _ts_key(rec)
-            if started_ts is not None and ts < started_ts:
-                continue  # 属于更早的运行
-            od = rec.get("outcome_detail")
-            if isinstance(od, str) and od.startswith("reported:"):
-                continue  # 中间行，不是本次运行的最终状态
-            best = rec
-            break
-        if best is None:
-            continue
-        od = best.get("outcome_detail")
-        w["wall_min"] = best.get("wall_min")
-        w["artifact_bytes"] = best.get("artifact_bytes")
-        w["outcome_detail"] = od if isinstance(od, str) else ""
-        read_audit = best.get("read_audit", "")
-        w["read_audit"] = read_audit if isinstance(read_audit, str) else ""
-        # exit_0_no_artifact 等失败只存在于遥测（worker-state 无 failed 值域），
-        # 据此校正；watcher 显式终态（landed/stopped/timed_out）不动。
-        if w["badge"] in ("active", "stale"):
-            if w["outcome_detail"].startswith("error"):
-                w["badge"], w["badge_text"] = "failed", "✕ 失败"
-            elif w["outcome_detail"].startswith("timeout"):
-                w["badge"], w["badge_text"] = "timeout", "⚠ 超时"
-        if w["badge"] == "active" and w["duration_min"] is None:
-            w["duration_min"] = w["wall_min"]
+        if started is None:
+            continue  # 无 started_at 无法划归属区间，不绑定遥测
+        ws_by_label.setdefault(w["label"], []).append((started.timestamp(), w))
+    for pairs in ws_by_label.values():
+        pairs.sort(key=lambda p: p[0])
+
+    for label, pairs in ws_by_label.items():
+        cands = by_label.get(label, [])
+        for i, (started_ts, w) in enumerate(pairs):
+            upper = pairs[i + 1][0] if i + 1 < len(pairs) else None
+            best = None
+            for rec in cands:
+                ts = _ts_key(rec)
+                if ts < started_ts:
+                    continue  # 属于更早的运行
+                if upper is not None and ts >= upper:
+                    break  # 越过区间上界：属于同 label 下一次运行
+                od = rec.get("outcome_detail")
+                # 中间行（reported:<status>）不是本次运行的最终状态；
+                # reported:handoff_required 是总期限交回的终态行，参与绑定
+                if (isinstance(od, str) and od.startswith("reported:")
+                        and od != "reported:handoff_required"):
+                    continue
+                best = rec
+                break
+            if best is None:
+                continue
+            od = best.get("outcome_detail")
+            w["wall_min"] = best.get("wall_min")
+            w["artifact_bytes"] = best.get("artifact_bytes")
+            w["outcome_detail"] = od if isinstance(od, str) else ""
+            read_audit = best.get("read_audit", "")
+            w["read_audit"] = read_audit if isinstance(read_audit, str) else ""
+            # exit_0_no_artifact 等失败只存在于遥测（worker-state 无 failed 值域），
+            # 据此校正；watcher 显式终态（landed/stopped/timed_out）不动。
+            if w["badge"] in ("active", "stale"):
+                if w["outcome_detail"].startswith("error"):
+                    w["badge"], w["badge_text"] = "failed", "✕ 失败"
+                elif (w["outcome_detail"].startswith("stall:")
+                        or w["outcome_detail"].startswith("killed:")):
+                    w["badge"], w["badge_text"] = "timeout", "⚠ 超时"
+            if w["badge"] == "active" and w["duration_min"] is None:
+                w["duration_min"] = w["wall_min"]
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +339,11 @@ def _write_config(config: dict[str, Any], path: Path) -> None:
                    encoding="utf-8", newline="\n")
     os.replace(tmp, path)
     # 配置变更立即使缓存失效并递增代次；build_state 回填前核对代次，防止
-    # 扫描期间发生的配置写被旧扫描结果覆盖回缓存
-    _STATE_CACHE["at"] = 0.0
-    _STATE_CACHE["gen"] += 1
+    # 扫描期间发生的配置写被旧扫描结果覆盖回缓存。失效与回填互斥于同一
+    # _STATE_LOCK（锁顺序保持 _CONFIG_LOCK → _STATE_LOCK，不反向嵌套）
+    with _STATE_LOCK:
+        _STATE_CACHE["at"] = 0.0
+        _STATE_CACHE["gen"] += 1
 
 
 # ThreadingHTTPServer 下两个写端点共用此锁，保护配置的读-改-写与固定 tmp 文件名
@@ -323,7 +353,9 @@ _CONFIG_LOCK = threading.Lock()
 # 多客户端轮询共享 TTL 内的缓存，避免每个请求都全量重扫拖满 CPU。
 _STATE_CACHE: dict[str, Any] = {"at": 0.0, "payload": None, "gen": 0}
 _STATE_CACHE_TTL = 10.0  # 秒
-_STATE_LOCK = threading.Lock()  # 扫描互斥（与配置写锁分离）
+# 扫描互斥（与配置写锁分离）；用可重入 RLock：同线程内配置写触发的失效
+# 需嵌套获取本锁（见 _write_config），跨线程互斥语义不变
+_STATE_LOCK = threading.RLock()
 
 
 def save_assignment(key: str, group: str, path: Path = GROUPS_PATH) -> dict[str, str]:
@@ -512,7 +544,6 @@ def build_state(handler: "BoardHandler", force: bool = False) -> dict[str, Any]:
                 # 自定义根按配置原样列出（含已失效项），失效也可移除，不留幽灵配置
                 "custom_roots": [{"path": raw, "exists": Path(raw).is_dir()} for raw in custom],
                 "generated_at": datetime.now().astimezone().isoformat(),
-                "dir_count": len({w["key"] for w in workers}),
                 "cache_ttl": _STATE_CACHE_TTL,
             }
             if _STATE_CACHE["gen"] == gen_before:

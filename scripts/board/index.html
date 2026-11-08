@@ -157,7 +157,7 @@ td.ok{color:var(--green)} td.bad{color:var(--red)} td.warn{color:var(--yellow)}
   <div id="groups"></div>
   <h2>遥测历史（dispatch-log，最近 200 条，受时间/模型/关键字筛选）</h2>
   <div style="max-height:300px;overflow:auto">
-  <table><thead><tr><th>时间</th><th>label</th><th>模型</th><th>结果</th><th>时长(m)</th><th>产物</th><th>读审计</th></tr></thead>
+  <table><thead><tr><th>时间</th><th>label</th><th>模型</th><th>结果</th><th>时长(m)</th><th>字节数</th><th>读审计</th></tr></thead>
   <tbody id="history"></tbody></table>
   </div>
 </main>
@@ -171,6 +171,9 @@ function loadSet(name){
   return new Set();
 }
 function saveSet(name,set){
+  if(set.size>500&&!truncWarned){  // 持久化时截断最早的项＝无声状态丢失，提示一次
+    toast("归档/折叠状态超出 500 项，最早项已复原");truncWarned=true;
+  }
   try{localStorage.setItem(name,JSON.stringify([...set].slice(-500)));}
   catch(e){/* 存储禁用/配额满：内存态仍生效，下轮渲染不受影响 */}
 }
@@ -178,7 +181,7 @@ let hidden=loadSet("ocsr-board-hidden");
 let hiddenGroups=loadSet("ocsr-board-hidden-groups");
 let collapsedGroups=loadSet("ocsr-board-collapsed");
 let expandedGroups=loadSet("ocsr-board-expanded");
-let showHidden=false, dragging=null, suspend=false, reqSeq=0, focusGroup="";
+let showHidden=false, dragging=null, suspend=false, reqSeq=0, focusGroup="", truncWarned=false;
 function loadPref(name, fallback){
   try{return localStorage.getItem(name)||fallback;}catch(e){return fallback;}
 }
@@ -189,10 +192,10 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 function toast(msg){const t=$("toast");t.textContent=msg;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,2000);}
-async function copyText(text){
-  try{await navigator.clipboard.writeText(text);toast("已复制");}
+async function copyText(text,msg){
+  try{await navigator.clipboard.writeText(text);toast(msg||"已复制");}
   catch(e){const ta=document.createElement("textarea");ta.value=text;document.body.appendChild(ta);
-    ta.select();document.execCommand("copy");ta.remove();toast("已复制");}
+    ta.select();document.execCommand("copy");ta.remove();toast(msg||"已复制");}
 }
 function fmtTime(iso){
   if(!iso)return "—";
@@ -220,7 +223,7 @@ function detailDl(w){
     <dt>最后活动</dt><dd>${esc((w.last_activity||"").replace("T"," ").slice(0,19)||"—")}</dd>
     <dt>状态</dt><dd>${esc(w.state)} · exit=${esc(w.exit_code??"—")} · 续期 ${esc(w.renewal_count??0)}</dd>
     <dt>结果</dt><dd>${esc(w.outcome_detail||"—")} ${w.read_audit?`· 读审计 ${esc(w.read_audit)}`:""}</dd>
-    <dt>产物</dt><dd>${esc(w.artifact_bytes??"—")} B</dd>
+    <dt>字节数</dt><dd>${esc(w.artifact_bytes??"—")} B</dd>
   </dl>`;
 }
 function sortWorkers(ws){
@@ -265,6 +268,9 @@ function timeOk(iso){
 }
 function workerTime(w){return w.last_activity||w.started_at||"";}  // 最近活动优先：启动早但仍活跃的 worker 不应被时间窗隐藏
 function groupOf(w){return DATA.assignments[w.key]||(w.cwd||"（未知工作目录）");}
+function groupCardCount(name){  // 全量卡片数（不受筛选影响），空组删除按此判定
+  let n=0;for(const w of DATA.workers)if(groupOf(w)===name)n++;return n;
+}
 function filtered(){
   const st=$("f-status").value, mo=$("f-model").value, q=$("f-q").value.trim().toLowerCase();
   return DATA.workers.filter(w=>{
@@ -355,7 +361,7 @@ function groupSection(name,ws){
       <span class="gops">
         <button data-gact="focus" data-group="${esc(name)}" title="只看此组">聚焦</button>
         <button data-gact="hide" data-group="${esc(name)}" title="整组归档（含该目录后续新派发；可在已归档中恢复）">${hiddenGroups.has(name)?"恢复":"归档"}</button>
-        ${(Object.values(DATA.assignments).includes(name)||pendingGroups.has(name))&&ws.length===0
+        ${(Object.values(DATA.assignments).includes(name)||pendingGroups.has(name))&&groupCardCount(name)===0
           ?`<button data-gact="delgroup" data-group="${esc(name)}" title="删除空组（清除其全部分配）">删除</button>`:""}
       </span></div>
     ${body}${more}</section>`;
@@ -399,7 +405,7 @@ function render(){
       <td>${esc(r.model)}</td><td class="${oc}">${esc(r.outcome)}</td>
       <td>${esc(r.wall_min??"—")}</td><td>${esc(r.artifact_bytes??"—")}</td><td>${esc(r.read_audit||"")}</td></tr>`;
   }).join("");
-  $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 轮询 ${pollMs/1000}s`;
+  $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)} · 轮询 ${pollMs/1000}s · 缓存 ${DATA.cache_ttl??10}s`;
   // 归档计数与「已归档」视图同一筛选口径（主视图时预览切过去将看到的数量）
   const savedShow=showHidden;showHidden=true;const archivedList=filtered();showHidden=savedShow;
   $("btn-show-hidden").textContent=(showHidden?"返回主视图":"已归档")+` (${archivedList.length})`;
@@ -422,6 +428,7 @@ async function load(force){
   try{
     const resp=await fetch("/api/state"+(force?"?fresh=1":""));
     const data=await resp.json();
+    if(!resp.ok||!Array.isArray(data.workers))throw new Error("bad /api/state payload");
     if(seq!==reqSeq)return;  // 只接受最新请求，防止旧响应覆盖刚保存的分组
     DATA=data;
     const models=[...new Set(DATA.workers.map(w=>w.model).filter(Boolean))].sort();
@@ -486,7 +493,7 @@ document.addEventListener("click",async e=>{
     render();return;
   }
   if(btn.dataset.act==="sid")copyText(w.session_id);
-  if(btn.dataset.act==="resume")copyText(`python scripts/ocsr_dispatch.py dispatch --resume-from "${w.dir}"`);
+  if(btn.dataset.act==="resume")copyText(`python scripts/ocsr_dispatch.py dispatch --worker "<prompt文件>|${w.model}|${w.label}-rework" --output-dir "<输出目录>" --resume-from "${w.dir}"`,"已复制返工模板（补全 prompt 与输出目录后执行）");
   if(btn.dataset.act==="hide"){
     if(isArchived(w)){unarchiveOne(w);}else{hidden.add(w.key);}
     saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);
@@ -502,6 +509,8 @@ document.addEventListener("dragend",()=>{dragging=null;suspend=false;});
 document.addEventListener("pointerdown",e=>{if(e.target.closest("[data-key]"))suspend=true;});
 document.addEventListener("pointerup",()=>{suspend=false;});
 document.addEventListener("pointercancel",()=>{suspend=false;});
+// 指针在窗口外释放/其他窗口抢焦点时事件丢失的兜底：复位暂停态与拖拽态
+window.addEventListener("blur",()=>{suspend=false;dragging=null;});
 document.addEventListener("dragover",e=>{
   const g=e.target.closest(".group-title");if(!g)return;
   e.preventDefault();g.classList.add("drop-hint");
@@ -575,9 +584,12 @@ $("btn-refresh").addEventListener("click",()=>load(true));
 // 自适应轮询：有进行中的 worker 时 5s，否则 15s；服务端另有 10s 扫描缓存
 let pollMs=5000;
 async function poll(){
-  await load();
-  pollMs=DATA.workers.some(w=>w.badge==="active")?5000:15000;
-  setTimeout(poll,pollMs);
+  try{
+    await load();
+    pollMs=DATA.workers.some(w=>w.badge==="active")?5000:15000;
+  }finally{
+    setTimeout(poll,pollMs);  // load 抛错也保证轮询链不中断
+  }
 }
 poll();
 </script>

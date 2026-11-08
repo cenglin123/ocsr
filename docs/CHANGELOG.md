@@ -2,6 +2,18 @@
 
 ## 2026-11-08
 
+### Board converge 收敛与落地
+
+#### 变更内容
+- converge 收敛完成：评议（阻断需修复）→ 修复 → 复评（可执行）→ 盲审 1（阻断需修复）→ 修复 → 复评 → 盲审 2（可执行，零阻断）。收敛现场与轮次产物存 `.converge/active/ocsr-board/`。
+- 本次收敛交付的实质修正：遥测归属区间上界（同 label 按 started_ts 划分互不重叠区间，旧 worker 不被下一次运行的终态行越界绑定）与 `reported:handoff_required` 终态值域（总期限交回的终态行参与绑定，其余 `reported:<status>` 中间行跳过）；/api/state 扫描缓存代次原子性（扫描期间配置写则放弃回填并重扫）；分组/归档/字节语义修正（拖放保存检查 resp.ok、空手动组可删除、归档计数与筛选同一口径）。
+- 落地小修：返工按钮复制内容改为可执行命令模板（补全 `--worker` 与 `--output-dir`；原片段缺必填参数，粘贴后 argparse 必败），toast 注明需补全；遥测行与 worker-state 的非字符串/空 label 容错（`"label": []` 这类值曾使绑定按字典键抛 TypeError、/api/state 持续 500——`read_history` 跳过坏行，扫描侧以目录名兜底）；deployment.md 补遥测归属适用前提。
+- 40 项面板测试（39+1，新增非字符串 label 全链路容错）；448 passed 全仓，verify 13/13、audit 通过。
+- **归档未完成（诚实记录）**：finish 在 archive 步失败（ledger-instance-conflict——流程中三次 instance_id 转录错误致 spawn 身份重复；instance_id 属 Archive Contract 不可修正字段，经用户授权的 record-correction 亦被拒），实质收敛结论不受影响，未伪造归档成功状态，现场保留在 active/。
+
+#### 迁移影响
+- 面板行为与文档一致；无配置格式变更，board-groups.json 结构不变。同 label 多次运行的遥测归属在「后续运行不在同一扫描根内 / 目录已清理 / 超出 200 行尾窗」时不保证准确（末位 worker 无上界），deployment.md 已注明。
+
 ### Board 整体终审修复：遥测归属、缓存代次与分组生命周期
 
 #### 变更内容
