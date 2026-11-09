@@ -2326,6 +2326,41 @@ def _resume_dispatch_args(
     return args
 
 
+class TestDescendantIdentity:
+    """后代检查的身份防护：PID 复用不误判，真正孤儿仍拒绝。"""
+
+    def test_pid_reuse_excludes_new_occupants_descendants(self):
+        # 原 root(100) 已退出，PID 被复用为 current(100, creation=2000)；
+        # 其后代(101/102)创建于 current 之后 → 不是原 worker 残留
+        table = {
+            100: {"parent_pid": 0, "creation_time": "2000"},
+            101: {"parent_pid": 100, "creation_time": "2100"},
+            102: {"parent_pid": 101, "creation_time": "2200"},
+        }
+        descendants = mod._descendant_pids(100, table, root_creation_time="1000")
+        assert descendants == set()
+
+    def test_true_orphans_still_rejected_when_not_reused(self):
+        # 原 root 已退出且未复用（table 无 100）：后代全部算残留
+        table = {
+            101: {"parent_pid": 100, "creation_time": "1500"},
+            102: {"parent_pid": 101, "creation_time": "1600"},
+        }
+        descendants = mod._descendant_pids(100, table, root_creation_time="1000")
+        assert descendants == {101, 102}
+
+    def test_reuse_keeps_only_original_era_orphans(self):
+        # 复用场景下：A(101) 创建于原 root 时代（1500<2000）保留；
+        # B(102) 创建于 current 之后（2100>=2000）排除
+        table = {
+            100: {"parent_pid": 0, "creation_time": "2000"},
+            101: {"parent_pid": 100, "creation_time": "1500"},
+            102: {"parent_pid": 100, "creation_time": "2100"},
+        }
+        descendants = mod._descendant_pids(100, table, root_creation_time="1000")
+        assert descendants == {101}
+
+
 class TestResumeFrom:
     """--resume-from: 单 worker、同模型、绑定可用、旧进程已退出。"""
 
