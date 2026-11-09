@@ -749,7 +749,8 @@ def _query_process_table() -> dict[int, dict]:
         "[ordered]@{ ProcessId = [int]$_.ProcessId; "
         "ParentProcessId = [int]$_.ParentProcessId; "
         "CreationTimeUtcTicks = ([datetime]$_.CreationDate).ToUniversalTime().Ticks."
-        "ToString([System.Globalization.CultureInfo]::InvariantCulture) } "
+        "ToString([System.Globalization.CultureInfo]::InvariantCulture); "
+        "CommandLine = [string]$_.CommandLine } "
         "} | ConvertTo-Json -Compress"
     )
     try:
@@ -778,18 +779,52 @@ def _query_process_table() -> dict[int, dict]:
         table[process_id] = {
             "parent_pid": parent_id,
             "creation_time": str(row.get("CreationTimeUtcTicks") or "").strip(),
+            "command": str(row.get("CommandLine") or "")[:200],  # 供误报时核对归属
         }
     return table
 
 
-def _descendant_pids(root_pid: int, table: dict[int, dict]) -> set[int]:
+def _ticks_to_iso(ticks: str) -> str:
+    """.NET UTC Ticks 转可读 ISO 时间（拒绝信息里的启动时间展示用）。"""
+    try:
+        t = int(ticks)
+        return datetime.datetime.fromtimestamp((t - 621355968000000000) / 1e7,
+                                               tz=datetime.timezone.utc).isoformat(timespec="seconds")
+    except (ValueError, OverflowError, OSError):
+        return ticks or "?"
+
+
+def _descendant_pids(root_pid: int, table: dict[int, dict],
+                     root_creation_time: str = "") -> set[int]:
+    """遍历 root 的后代，但带身份防护：
+
+    原 root 已退出且其 PID 被复用（当前占用者的 creation_time 与原 root 不同）时，
+    只保留创建时间早于当前占用者的进程（原 root 时代的真正孤儿）；
+    当前占用者的后代（创建时间 >= 当前占用者）不算原 worker 残留。
+    原 root 已退出且未复用（当前无占用者）时，全部后代都算残留。
+    """
+    current = table.get(root_pid)
+    pid_reused = (
+        current is not None and root_creation_time
+        and current.get("creation_time") != root_creation_time
+    )
+    current_creation = current.get("creation_time", "") if pid_reused else ""
     descendants: set[int] = set()
     frontier = {root_pid}
     while frontier:
-        children = {
-            pid for pid, info in table.items()
-            if pid not in descendants and int(info.get("parent_pid", 0)) in frontier
-        }
+        # 只在 root 的直接子进程层按创建时间过滤：原时代孤儿的更晚子孙仍属该 worker，
+        # 不应因创建时间晚于当前占用者而被漏报
+        first_level = frontier == {root_pid}
+        children = set()
+        for pid, info in table.items():
+            if pid in descendants or int(info.get("parent_pid", 0)) not in frontier:
+                continue
+            if pid_reused and first_level:
+                # 当前占用者的后代不是原 worker 的残留；创建时间无法判定的保留并提示核对
+                child_creation = info.get("creation_time") or ""
+                if child_creation and child_creation >= current_creation:
+                    continue
+            children.add(pid)
         descendants.update(children)
         frontier = children
     descendants.discard(root_pid)
@@ -820,7 +855,7 @@ def _capture_worker_snapshot(
     table = _query_process_table()
     pid = _read_pid(wd)
     identity = _read_json_object(wd / PROCESS_IDENTITY_FILE) or {}
-    descendants = sorted(_descendant_pids(pid, table)) if pid is not None and table else []
+    descendants = sorted(_descendant_pids(pid, table, identity.get("creation_time", ""))) if pid is not None and table else []
     root = table.get(pid, {}) if pid is not None else {}
     identity_pid = identity.get("pid")
     identity_creation_time = str(identity.get("creation_time") or "").strip()
@@ -2049,10 +2084,16 @@ def cmd_dispatch(args) -> int:
             print("❌ 无法确认原 worker 进程已退出（进程表不可读或身份缺失），拒绝续接",
                   file=sys.stderr)
             return 1
-        descendants = sorted(_descendant_pids(resume_ctx["pid"], process_table))
+        descendants = sorted(_descendant_pids(resume_ctx["pid"], process_table,
+                                              resume_ctx.get("creation_time", "")))
         if descendants:
-            print(f"❌ 原 worker 仍有存活后代进程 {descendants}"
-                  f"（可能为 opencode 残留），拒绝续接；请先清理后再试", file=sys.stderr)
+            print("❌ 原 worker 仍有存活后代进程，拒绝续接；请先核对归属（可能是 PID 复用）：", file=sys.stderr)
+            for pid in descendants:
+                info = process_table.get(pid, {})
+                print(f"  - pid={pid} 启动={_ticks_to_iso(info.get('creation_time', ''))} "
+                      f"命令={info.get('command', '')}", file=sys.stderr)
+            print("请先确认这些进程确属该 worker 再清理；若为 PID 复用，请改用新开 worker。",
+                  file=sys.stderr)
             return 1
         original_attempt = resume_ctx.get("attempt_index")
         original_rework = resume_ctx.get("rework_index", 0)

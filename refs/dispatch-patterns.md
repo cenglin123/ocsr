@@ -185,7 +185,7 @@ worker 已正常完成、上层按验收清单要求具体修复时，用 `dispa
 - 原工作目录仍然存在（`session-binding.json` 的 `cwd`）。旧版派发没有 `cwd` 记录时驱动器只提示无法核对，不阻止。
 - worker 已正常完成并落盘，本轮是按其产物与验收清单做具体修复。
 - 上下文未被压缩，且原 session 绑定可用（`session-binding.json` 有唯一 `session_id`）。
-- 旧 worker 进程及其身份已确认退出（PID 不存在，或 PID 已被复用），且进程表中没有仍以该 PID 为父的后代（避免 opencode 子进程残留）。
+- 旧 worker 进程及其身份已确认退出（PID 不存在，或 PID 已被复用），且进程表中没有仍以该 PID 为父的后代（避免 opencode 子进程残留）。后代检查带身份：PID 被复用时只保留创建时间早于当前占用者的进程（原 root 时代的孤儿），当前占用者的后代不算残留；拒绝信息列出可疑进程的启动时间与命令行并提醒先核对归属（可能是 PID 复用），避免误杀别的会话的进程。已知局限：中间节点退出后其孙代因父链断链而不可见（遍历仅从 root 出发，不回溯已消失的中间父节点）。
 - 工作目录未被他人改动；若已改动，先说明现状，避免 worker 按旧上下文覆盖。
 
 ### 原工作目录
@@ -222,7 +222,7 @@ python scripts/ocsr_dispatch.py dispatch `
   --output-dir <dir> --output-pattern R1-fix.md --watch
 ```
 
-驱动器会校验：只允许单个 worker；原派发模型与本次 `--worker` 模型一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 可用；原 `cwd` 仍存在（缺失时只警告、已删除时拒绝）；旧 PID 与创建时间确认已退出（PID 复用视为已退出，无法确认则拒绝），且进程表中没有仍以该 PID 为父的后代（有存活后代则拒绝）。通过后 launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本记录 `resumed_from`、`resume_session`、`resume_mode`、`attempt_index` 与 `rework_index`，`worker-state.json` 同样记录 `resume_mode`、`attempt_index` 与 `rework_index`。新会话仍写新的 `session-binding.json`（含 `cwd`）；返回的 sessionID 与原 id 不同时照实记录并提示——回读与提示只在 `--watch` 路径执行。非 `--watch` 派发也会在启动时写入 `worker-state.json`。
+驱动器会校验：只允许单个 worker；原派发模型与本次 `--worker` 模型一致（从原目录 `launcher.ps1` 核对，无法核对即拒绝）；`session-binding.json` 可用；原 `cwd` 仍存在（缺失时只警告、已删除时拒绝）；旧 PID 与创建时间确认已退出（PID 复用视为已退出，无法确认则拒绝），且进程表中没有仍以该 PID 为父的后代（有存活后代则拒绝；PID 复用时只保留创建时间早于当前占用者的后代，当前占用者的后代不算残留，拒绝信息列出启动时间与命令行并提醒先核对归属）。通过后 launcher 以 `opencode run <prompt> --format json --standalone --session <id> -m <model>` 启动，照常走看门狗、产物验收、ledger 与 telemetry；账本记录 `resumed_from`、`resume_session`、`resume_mode`、`attempt_index` 与 `rework_index`，`worker-state.json` 同样记录 `resume_mode`、`attempt_index` 与 `rework_index`。新会话仍写新的 `session-binding.json`（含 `cwd`）；返回的 sessionID 与原 id 不同时照实记录并提示——回读与提示只在 `--watch` 路径执行。非 `--watch` 派发也会在启动时写入 `worker-state.json`。
 
 ### 与故障恢复材料的区别
 
