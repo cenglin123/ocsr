@@ -2360,6 +2360,50 @@ class TestDescendantIdentity:
         descendants = mod._descendant_pids(100, table, root_creation_time="1000")
         assert descendants == {101}
 
+    def test_reuse_keeps_unknown_creation_time(self):
+        # 创建时间无法判定的子进程保留（不误杀、提示核对）
+        table = {
+            100: {"parent_pid": 0, "creation_time": "2000"},
+            101: {"parent_pid": 100, "creation_time": ""},
+        }
+        descendants = mod._descendant_pids(100, table, root_creation_time="1000")
+        assert descendants == {101}
+
+    def test_reuse_excludes_equal_creation_time(self):
+        # 创建时间恰好等于当前占用者（>= 边界）→ 排除
+        table = {
+            100: {"parent_pid": 0, "creation_time": "2000"},
+            101: {"parent_pid": 100, "creation_time": "2000"},
+        }
+        descendants = mod._descendant_pids(100, table, root_creation_time="1000")
+        assert descendants == set()
+
+    def test_reuse_keeps_grandchildren_of_original_orphans(self):
+        # 原时代孤儿(101) 在占用者启动后又派生的子进程(102) 也属该 worker，不漏报
+        table = {
+            100: {"parent_pid": 0, "creation_time": "2000"},
+            101: {"parent_pid": 100, "creation_time": "1500"},
+            102: {"parent_pid": 101, "creation_time": "2100"},
+        }
+        descendants = mod._descendant_pids(100, table, root_creation_time="1000")
+        assert descendants == {101, 102}
+
+    def test_process_table_includes_command_line(self):
+        # PowerShell 必须投影 CommandLine，否则归属核对无证据（F1 回归）
+        payload = [{"ProcessId": 100, "ParentProcessId": 0,
+                    "CreationTimeUtcTicks": "1000", "CommandLine": "pwsh -File x.ps1"}]
+        with mock.patch.object(mod.subprocess, "run",
+                               return_value=mock.Mock(returncode=0,
+                                                      stdout=json.dumps(payload), stderr="")):
+            table = mod._query_process_table()
+        assert table[100]["command"] == "pwsh -File x.ps1"
+
+    def test_ticks_to_iso_readable(self):
+        # .NET ticks → 可读 ISO；非法值原样返回
+        assert mod._ticks_to_iso("639295403711045150").startswith("2026-")
+        assert mod._ticks_to_iso("") == "?"
+        assert mod._ticks_to_iso("bad") == "bad"
+
 
 class TestResumeFrom:
     """--resume-from: 单 worker、同模型、绑定可用、旧进程已退出。"""
