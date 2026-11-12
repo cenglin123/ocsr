@@ -748,25 +748,30 @@ def _decode_native(data: bytes | str | None) -> str:
     背景：PowerShell/tasklist 等在本机代码页（CP936）输出中文，-X utf8 下
     subprocess text=True 会按 UTF-8 解码而整体失败（UnicodeDecodeError）。
     按字节读取后显式解码，个别非 UTF-8 字节不再导致整个读取失败。
+    统一 CRLF→LF（与原 text=True 的 universal newlines 行为一致）。
+    已知限制：整条流二选一（UTF-8 strict 失败才按本机代码页），混合编码流的
+    边缘情形可能乱码（git core.quotepath 默认把非 ASCII 路径转义为 ASCII，
+    实际触发概率低）。
     """
     if data is None:
         return ""
     if isinstance(data, str):
-        return data
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
+        text = data
+    else:
         try:
-            return data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
-        except Exception:
-            return data.decode("utf-8", errors="replace")
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
+            except Exception:
+                text = data.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n")
 
 
 def _query_process_table() -> dict[int, dict]:
     """读取 Windows 进程 PID/父 PID/创建身份；失败返回空表并由调用方 fail-closed。"""
     command = (
         "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
-        "$OutputEncoding = [Console]::OutputEncoding; "
         "Get-CimInstance Win32_Process | ForEach-Object { "
         "[ordered]@{ ProcessId = [int]$_.ProcessId; "
         "ParentProcessId = [int]$_.ParentProcessId; "

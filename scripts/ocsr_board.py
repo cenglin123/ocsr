@@ -602,18 +602,21 @@ def kill_pid(pid: int) -> None:
 
 
 def _decode_native(data: bytes | str | None) -> str:
-    """原生命令输出的容错解码：UTF-8 strict 优先，失败按本机代码页（Windows mbcs）。"""
+    """原生命令输出的容错解码：UTF-8 strict 优先，失败按本机代码页（Windows mbcs）。
+    统一 CRLF→LF（与原 text=True 的 universal newlines 行为一致）。"""
     if data is None:
         return ""
     if isinstance(data, str):
-        return data
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
+        text = data
+    else:
         try:
-            return data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
-        except Exception:
-            return data.decode("utf-8", errors="replace")
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
+            except Exception:
+                text = data.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n")
 
 
 def verify_board_process(pid: int) -> bool:
@@ -622,6 +625,7 @@ def verify_board_process(pid: int) -> bool:
         if os.name == "nt":
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
+                 "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
                  f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"],
                 capture_output=True, timeout=10)
             return "ocsr_board.py" in _decode_native(out.stdout)
