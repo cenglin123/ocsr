@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -807,6 +808,27 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _decode_native(data: bytes | str | None) -> str:
+    """原生命令输出容错解码：UTF-8 strict 优先，失败按本机代码页（Windows mbcs）。
+
+    不再用 encoding=utf-8 errors=replace：CP936 中文会被替换成 U+FFFD，
+    含中文的 expect 正则会失配。统一 CRLF→LF（与原 universal newlines 一致）。
+    """
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        text = data
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
+            except Exception:
+                text = data.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n")
+
+
 def _run_hook(hook: dict, ctx: dict, label: str) -> tuple[bool, dict, str]:
     """执行一个 hook（独立步骤或内联 pre/post）。
 
@@ -815,13 +837,12 @@ def _run_hook(hook: dict, ctx: dict, label: str) -> tuple[bool, dict, str]:
     argv = [str(a) for a in render(hook["run"], ctx)]
     timeout = hook.get("timeout_sec", DEFAULT_HOOK_TIMEOUT_SEC)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
     except FileNotFoundError:
         return (False, {}, f"{label}: 可执行文件不存在: {argv[0]}")
     except subprocess.TimeoutExpired:
         return (False, {}, f"{label}: 超时 {timeout}s: {' '.join(argv[:4])}")
-    out = (proc.stdout or "") + (proc.stderr or "")
+    out = _decode_native(proc.stdout) + _decode_native(proc.stderr)
     if proc.returncode != 0:
         return (False, {}, f"{label}: rc={proc.returncode} :: {out.strip()[:300]}")
     expect = hook.get("expect")

@@ -2,6 +2,18 @@
 
 ## 2026-11-09
 
+### 进程表读取编码容错（handoff 20261112）
+
+#### 变更内容
+- 根因：_query_process_table 的 subprocess text=True 在 -X utf8 下按 UTF-8 解码，而 PowerShell 在本机代码页（CP936）输出中文 → UnicodeDecodeError 致进程表不可读，续接按 fail-closed 拒绝。
+- 修复：新增 _decode_native（按字节读 + UTF-8 strict 优先 + 本机代码页 mbcs 兜底 + CRLF→LF 归一化）；PowerShell 命令设 [Console]::OutputEncoding=UTF-8 使输出确定为 UTF-8；同类 text=True 读取点统一改字节读 + 容错解码（_lookup_model_cost/_is_process_running/_terminate_tracked_process/_git_status_porcelain/board.verify_board_process/run_spec hook）。
+- 返回码：拒绝续接 return 1（非零）为既有契约，回归测试已真实触达续接拒绝分支（此前被白名单提前拦截的误覆盖已修正）。
+- fresh 复查（deepseek/deepseek-flash）REVISE，7 项发现全部修复：返回码测试真实覆盖续接拒绝、board 解码测试覆盖、board PowerShell 同设 UTF-8、run_spec 改统一容错（中文 expect 不再失配）、平台保护、$OutputEncoding 无效行删除、CRLF 归一化（修复去掉 text=True 后 $ 失配）。
+- 5 项新增测试（test_native_decoding.py）；492 passed 全仓；verify 13/13、audit 通过。
+
+#### 迁移影响
+- 进程表读取不再因个别非 UTF-8 字节整体失败；续接拒绝仍返回非零。部署到各宿主副本后生效。
+
 ### resume-from 后代检查身份防护（handoff）
 
 #### 变更内容
@@ -16,7 +28,6 @@
 ## 2026-11-08
 
 ### 派发目录解耦与面板自动发现（handoff）
-
 #### 变更内容
 - **解耦**：派发目录默认放 TEMP（新增 --dispatch-root 显式覆盖父目录）；--work-dir 明确为 worker 执行目录（opencode 位置参数目录 + launcher Set-Location，默认 dispatcher cwd）。派发证据不再落进 git 工作树；--work-dir <worktree> 让 worker 在工作树改代码真正生效。
 - **自动发现**：dispatcher 启动派发时把派发目录父目录登记到 ~/.ocsr/dispatch-roots.json（驱动器写、面板只读）；面板扫描根并入登记根（近 30 天、存在目录、失效/超期跳过）；登记根在面板可「忽略」（只改面板配置，不改驱动器文件）。

@@ -4,6 +4,7 @@
 
 ## 当前状态
 
+- 进程表读取编码容错（handoff 20261112）已落地：_decode_native（字节读 + UTF-8 优先 + mbcs 兜底 + CRLF 归一化）+ PowerShell 显式 UTF-8 输出；同类 text=True 读取点统一修复。492 passed（487+5），verify 13/13、audit、diff/eol 通过。fresh reviewer（deepseek-flash）REVISE，7 项发现全部修复（含返回码测试真实覆盖续接拒绝、CRLF 归一化等）；报告 `.review/native-decoding-20261112/`。预算 2/2。
 - resume-from 后代检查身份防护（handoff）已落地：PID 复用时只保留原 root 时代的孤儿（当前占用者后代不算残留），不再误拒或诱导误杀；拒绝信息含可读启动时间与命令行并提醒先核对归属。487 passed（482+5），verify 13/13、audit、diff/eol 通过。fresh reviewer（deepseek-flash）REVISE，5 项发现全部修复（含 CommandLine 投影缺失的实质缺陷）；报告 `.review/resume-pid-identity-20261109/`。预算 2/2。
 - 派发目录解耦与面板自动发现（handoff）已落地：派发目录默认 TEMP（--dispatch-root 覆盖），--work-dir 明确为 worker 执行目录（launcher Set-Location + opencode 位置参数目录，git 工作树实证生效）；dispatcher 启动登记 dispatch-roots.json，面板自动并入（失效/超期跳过、可忽略）。479 passed 全仓，verify 13/13、audit、diff/eol 通过；真实派发验证解耦与自动发现，交接现场样本只读确认。fresh reviewer（deepseek-flash）REVISE，12 项发现全部修复（含 F1 的 launcher 目录接线实证）；报告 `.review/dispatch-root-decouple-20261108/`。预算 6 次真实调用（1 preflight + 2 验证派发 + 1 复查 + 2 cwd 实证），逐段披露。
 - Board 性能与生命周期（handoff 20261108-ocsr-board-perf）：增量扫描（目录指纹 + 日志偏移）+ 目录名先过滤再 IO（scan_workers 2.43s→0.43s）；单实例锁文件（board.lock）重复启动 KILL 重启；--idle-timeout 空闲自动退出（默认 30 分钟）。470 passed（462+8 含 fresh 复查修复），verify 13/13、audit、diff/eol 通过；前后对比、单实例重启、空闲退出均实测。fresh reviewer（deepseek-flash）REVISE，8 项发现全部修复（多根缓存互清、日志替换混合、KILL 时机与守卫、测试假阳性等）；报告 `.review/board-incremental-20261108/`。预算 2/2。

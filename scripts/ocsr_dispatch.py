@@ -742,9 +742,36 @@ def _resume_row_fields(p: dict) -> dict[str, object]:
     }
 
 
+def _decode_native(data: bytes | str | None) -> str:
+    """原生命令输出的容错解码：UTF-8 strict 优先，失败按本机代码页（Windows mbcs）。
+
+    背景：PowerShell/tasklist 等在本机代码页（CP936）输出中文，-X utf8 下
+    subprocess text=True 会按 UTF-8 解码而整体失败（UnicodeDecodeError）。
+    按字节读取后显式解码，个别非 UTF-8 字节不再导致整个读取失败。
+    统一 CRLF→LF（与原 text=True 的 universal newlines 行为一致）。
+    已知限制：整条流二选一（UTF-8 strict 失败才按本机代码页），混合编码流的
+    边缘情形可能乱码（git core.quotepath 默认把非 ASCII 路径转义为 ASCII，
+    实际触发概率低）。
+    """
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        text = data
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
+            except Exception:
+                text = data.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n")
+
+
 def _query_process_table() -> dict[int, dict]:
     """读取 Windows 进程 PID/父 PID/创建身份；失败返回空表并由调用方 fail-closed。"""
     command = (
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
         "Get-CimInstance Win32_Process | ForEach-Object { "
         "[ordered]@{ ProcessId = [int]$_.ProcessId; "
         "ParentProcessId = [int]$_.ParentProcessId; "
@@ -756,14 +783,14 @@ def _query_process_table() -> dict[int, dict]:
     try:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, timeout=15,
         )
     except Exception:
         return {}
-    if proc is None or getattr(proc, "returncode", 1) != 0 or not (getattr(proc, "stdout", "") or "").strip():
+    if proc is None or getattr(proc, "returncode", 1) != 0 or not (getattr(proc, "stdout", b"") or b"").strip():
         return {}
     try:
-        raw = json.loads(proc.stdout)
+        raw = json.loads(_decode_native(proc.stdout))
     except json.JSONDecodeError:
         return {}
     rows = raw if isinstance(raw, list) else [raw]
@@ -1249,9 +1276,9 @@ def _refresh_cost_cache(force: bool = False) -> dict:
     try:
         proc = subprocess.run(
             ["opencode", "models", "--verbose"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, timeout=30,
         )
-        raw = (proc.stdout or "") + (proc.stderr or "")
+        raw = _decode_native(proc.stdout) + _decode_native(proc.stderr)
         # 解析多段 JSON 输出：每段以模型 ID 行开头，紧接 JSON 行
         cache: dict = {}
         lines = raw.strip().split("\n")
@@ -1627,9 +1654,9 @@ def _is_process_running(process_name: str) -> bool:
         try:
             proc = subprocess.run(
                 ["tasklist", "/FI", f"IMAGENAME eq {process_name}"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, timeout=15,
             )
-            return len(proc.stdout.strip().split("\n")) > 1
+            return len(_decode_native(proc.stdout).strip().split("\n")) > 1
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
     else:
@@ -2249,13 +2276,13 @@ def _kill_worker(label: str, wd: Path) -> bool:
     try:
         proc = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, timeout=15,
         )
     except Exception as e:
         print(f"[ocsr] ⚠️ {label} taskkill PID={pid} 异常: {e}", file=sys.stderr)
         return False
     if proc.returncode != 0:
-        detail = ((proc.stdout or "") + (proc.stderr or "")).strip()[:200]
+        detail = (_decode_native(proc.stdout) + _decode_native(proc.stderr)).strip()[:200]
         print(f"[ocsr] ⚠️ {label} taskkill PID={pid} 失败 (rc={proc.returncode}): {detail}",
               file=sys.stderr)
         return False
@@ -3187,12 +3214,12 @@ def _git_status_porcelain(repo: Path) -> list[str]:
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, timeout=30,
         )
         if proc.returncode != 0:
             return []
         files: list[str] = []
-        for raw_line in proc.stdout.split("\n"):
+        for raw_line in _decode_native(proc.stdout).split("\n"):
             raw_line = raw_line.rstrip("\r\n")
             if not raw_line:
                 continue
