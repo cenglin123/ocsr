@@ -601,6 +601,21 @@ def kill_pid(pid: int) -> None:
         pass  # 目标可能已退出；由后续 bind 结果判定端口是否释放
 
 
+def _decode_native(data: bytes | str | None) -> str:
+    """原生命令输出的容错解码：UTF-8 strict 优先，失败按本机代码页（Windows mbcs）。"""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
+        except Exception:
+            return data.decode("utf-8", errors="replace")
+
+
 def verify_board_process(pid: int) -> bool:
     """KILL 前二次核对目标进程命令行确为 ocsr_board.py（防伪 identity 误杀）。"""
     try:
@@ -608,8 +623,8 @@ def verify_board_process(pid: int) -> bool:
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"],
-                capture_output=True, text=True, timeout=10)
-            return "ocsr_board.py" in (out.stdout or "")
+                capture_output=True, timeout=10)
+            return "ocsr_board.py" in _decode_native(out.stdout)
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", errors="replace")
         return "ocsr_board.py" in cmdline
     except (OSError, subprocess.SubprocessError):
