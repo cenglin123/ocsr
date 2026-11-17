@@ -7,6 +7,7 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 - 本地：`dsh plugin --profile <p> add .`（在仓库根目录运行；`dsh` 会把相对路径锚定到当前目录）。
 - 发布：npm 包名 `dsh-ocsr`（**尚未发布**，待 npm 账号可用时执行 `npm publish`）；当前安装用 GitHub 源 `dsh plugin --profile <p> add github:cenglin123/ocsr`。
 - 安装后 `dsh.profile.bundles` 自动加入 `dsh-ocsr`；`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，在 profile 层插入两个 entry：`ocsr-skill`（`dsh-ocsr`，技能 provider）与 `ocsr-tools`（`dsh-ocsr/tool`，派发工具）。
+- **从旧包升级（重要）**：`@ocsr/dsh-ocsr@0.1.x` 的 peer 锁 `^0.1.1-rc.2`，在 dsh 0.2.x（含 0.2.2-rc.3）上会被版本门 skip（`skipping profile bundle ... incompatible`）。0.2.0 起包名是 `dsh-ocsr`，两者包名不同，必须 `dsh plugin --profile <p> remove @ocsr/dsh-ocsr` 后再安装新包；`desktop` profile 由 Electron 独占，只能在桌面应用的插件管理/市场里移除与安装。
 - **版本门（dsh 0.2.2）**：安装预检只读插件 manifest，不加载插件代码。`engines.dsh` 存在时它是唯一依据（本包的 `@deepseek-ai/dsh*` peer 因此不参与判定），否则逐个检查 dsh peer。不满足时安装命令拒绝并把不兼容项写进诊断；要强行安装须 `dsh plugin --profile <p> allow-version <name>@<version> --dsh-version <dsh-version> --accept-risk` 做精确版本豁免（等于自行承担崩溃/数据损坏风险，不建议）。已安装但不兼容的 bundle 在加载期被 skip，stderr 打印 `skipping profile bundle ...`，不会以旧契约静默运行。本包声明 `engines.dsh: ^0.2.2-rc.1`。
 
 ## 配置
@@ -31,7 +32,7 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 
 ## 版本锁定
 
-- 实测基线：DeepSeek Harness desktop `0.2.2-rc.1`，其中 `@deepseek-ai/cordis` 4.1.0、`@deepseek-ai/schemastery` 3.19.0，`@deepseek-ai/dsh-skill`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-jobs` 均为 0.2.2-rc.1（全局安装 `<user-home>/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh`）。
+- 实测基线：DeepSeek Harness desktop `0.2.2-rc.3`（2026-11-17 复核，`engines.dsh ^0.2.2-rc.1` 覆盖），其中 `@deepseek-ai/cordis` 4.1.0、`@deepseek-ai/schemastery` 3.19.0、`@deepseek-ai/dsh-{skill,tools,jobs}` 均为 0.2.2-rc.3；rc.3 宿主包下 `tests/adapter` 11 项全过。此前基线为 `0.2.2-rc.1`（全局安装 checkout）。
 - `package.json`：`engines.dsh ^0.2.2-rc.1`；peerDependencies `@deepseek-ai/cordis ^4.1.0`、`@deepseek-ai/dsh-skill ^0.2.2-rc.1`、`@deepseek-ai/dsh-tools ^0.2.2-rc.1`、`@deepseek-ai/schemastery ^3.19.0`；dependencies `yaml ^2.8.1`。jobs/settings/session/projection 相关的旧 peer 已全部移除（jobs 只经 `ctx.get('jobs')` 取用，声明成 peer 也会误伤未挂载 jobs 的 profile）。
 - 升级宿主时先复核这些接口：`skills.registerProvider(control)` 与 provider/candidate/definition 契约（含 `BUNDLED_SKILL_RANK`、`control.invalidate()`）；`defineTool` 的 parameters/output schema 与 `exec.agent?.id`；jobs 的 `JobSpec`/`JobHandle.append`/`JobHooks`（`cancel` 与 `done` 的 `completed|killed|failed` 状态）；`ctx.get('jobs')`；插件 `Config` 的 schemastery 校验；`dsh.bundle.patch` 的 entry 语法与 agent preset 名单/`tool-skill` 挂载。
 

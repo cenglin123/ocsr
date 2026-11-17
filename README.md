@@ -15,6 +15,24 @@ python scripts/verify_ocsr_skill.py
 
 运行规则、prompt 六要素、产物回收和模型分工以 [SKILL.md](SKILL.md) 为准。
 
+## 升级自旧包（`@ocsr/dsh-ocsr` 0.1.x）
+
+0.2.0 之前的包 `@ocsr/dsh-ocsr@0.1.x` 与 dsh 0.2.x 不兼容，宿主启动时会被跳过：
+
+```text
+skipping profile bundle "@ocsr/dsh-ocsr": Plugin @ocsr/dsh-ocsr@0.1.0 is incompatible with dsh 0.2.2-rc.3 ...
+```
+
+0.2.0 起包名改为 `dsh-ocsr` 并适配 dsh 0.2.x。两个名字不同，**直接安装不会替换旧条目**，必须先移除旧包：
+
+```powershell
+# 普通 profile（web / headless / 自建 profile）
+dsh plugin --profile <p> remove @ocsr/dsh-ocsr
+dsh plugin --profile <p> add github:cenglin123/ocsr
+```
+
+`desktop` profile 由 Electron 应用独占，CLI 会拒绝改写（`profile "desktop" is managed exclusively by the Electron application`）：请在桌面应用的插件管理/市场里移除旧插件，再安装 OCSR（市场条目已收录），然后重启应用。重启后不应再出现 skip；普通 profile 可用 `dsh --profile <p> --dump-config` 确认只剩 `dsh-ocsr` 的两个 entry。
+
 ## 文档
 
 - Agent 协作入口：[AGENTS.md](AGENTS.md)
