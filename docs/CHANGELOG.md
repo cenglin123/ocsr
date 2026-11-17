@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-11-17
+
+### dsh 0.2.2-rc.3 兼容性核对与旧包迁移说明
+
+#### 变更内容
+- 用桌面版 rc.3 宿主包复核版本门：`evaluatePluginCompatibility` 对 `dsh-ocsr@0.2.1` 返回可兼容；对旧包 `@ocsr/dsh-ocsr@0.1.0` 返回 8 项 unmet（peer 锁 `^0.1.1-rc.2`），与启动时的 `skipping profile bundle ... incompatible` 信息一致。
+- 以 rc.3 的 `@deepseek-ai/*` 宿主包运行 `tests/adapter`：11 项全部通过（版本门、真实 SkillRegistry、tool/Config 窄门、jobs 输出环与状态映射等），适配层无需改代码。
+- `README.md` 与 `refs/dsh-integration.md` 补充旧包迁移说明：0.1.x 与 0.2.x 包名不同，必须 `remove @ocsr/dsh-ocsr` 后再安装 `github:cenglin123/ocsr`；`desktop` profile 由 Electron 独占，只能在桌面应用的插件管理/市场里操作。
+
+#### 迁移影响
+- 已装 0.1.x 的 profile 按文档移除后重装 `dsh-ocsr`；不要用 `allow-version` 绕过版本门（绕过后 settings/projection/后台派发仍是旧契约，无法正常工作）。
+
 ## 2026-11-09
 
 ### 进程表读取编码容错（handoff 20261112）
