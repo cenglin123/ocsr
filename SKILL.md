@@ -51,7 +51,7 @@ OCSR（OpenCode Subagents Run）以 headless `opencode run` 派发可选模型�
 python scripts/ocsr_dispatch.py dispatch --worker "<prompt>|<model>|<label>" --output-dir <dir> --output-pattern <unique-name> --watch
 ```
 
-驱动器负责错峰、看门狗、输出存在性/快照比对与 telemetry（`dispatch-log`），不替代编排判断。前台 timeout 足够时优先前台运行。需要并发、`Start-Process` 脱管、双监视、静默停滞处理或完整失败切换阶梯时，读取 [`refs/dispatch-patterns.md`](refs/dispatch-patterns.md)。该文件的**脱管派发模式**定义 launcher、`Start-Process` 与双监视；其中的硬事实仍是：脱管进程必须设阈值；默认 15 分钟且可按 `max(10 分钟, 1.5 × 实测耗时)` 调整；模型端静默停滞须按完整指纹裁决。`harness 前台超时 < 单轮耗时` 时也不能以无限轮询代替看护。用至少 **≥5 次** 同类遥测样本再调整默认模型或阈值，不能以个例翻转默认。
+驱动器负责错峰、看门狗、输出存在性/快照比对与 telemetry（`dispatch-log`），不替代编排判断。OpenCode 宿主的 shell 工具默认超时只有 **120 秒**，而前台 `--watch` 派发要阻塞到看门狗总期限（`--timeout × (max-renewals + 1)`，默认配置即 15×2=30 分钟）：**前台派发的 shell 调用必须显式指定 timeout ≥ 本次派发的总期限**（另留启动与验收余量），否则第一次派发就会在 120 秒被宿主切断——watcher 失明后已脱管的 worker 继续消耗模型，任务极易被误判失败而重派。前台 timeout 足够时优先前台运行；需要并发、`Start-Process` 脱管、双监视、静默停滞处理或完整失败切换阶梯时，读取 [`refs/dispatch-patterns.md`](refs/dispatch-patterns.md)。该文件的**脱管派发模式**定义 launcher、`Start-Process` 与双监视；其中的硬事实仍是：脱管进程必须设阈值；默认 15 分钟且可按 `max(10 分钟, 1.5 × 实测耗时)` 调整；模型端静默停滞须按完整指纹裁决。`harness 前台超时 < 单轮耗时` 时也不能以无限轮询代替看护，给不出足够长的前台超时就改走脱管派发模式。用至少 **≥5 次** 同类遥测样本再调整默认模型或阈值，不能以个例翻转默认。
 
 失败切换阶梯、切换 family 与通道例外的操作细则在该专题；达到三次上限则停止并交回用户。`--fork` 不是默认路径；若使用，必须同时有 `--continue` 或 `--session`。
 

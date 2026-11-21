@@ -94,7 +94,7 @@ session 恢复由上层作为新的、显式授权的 invocation 发起：沿用
 
 > **入口条件**：当 `scripts/ocsr_dispatch.py` 可用时优先用驱动器 `dispatch --watch`；仅当驱动器不可用（非本机环境、脚本缺失）时回退本节手写模式。
 
-当 harness 前台 shell 工具的超时上限 **小于** 预计单轮耗时（判断密集角色在 harness 规划阶段的估算单轮常 20–30 分钟——含 prompt 构建、排队长尾、完整收敛往返——而多数 harness 前台上限 ≤10 分钟）时，前台运行不可用，后台通道又会被 kill。此时用**脱管派发**：让 `opencode run` 脱离 harness 任务生命周期独立运行，harness 侧只跑一个纯 shell 观察器等产物。
+当 harness 前台 shell 工具的超时上限 **小于** 预计单轮耗时（判断密集角色在 harness 规划阶段的估算单轮常 20–30 分钟——含 prompt 构建、排队长尾、完整收敛往返——而多数 harness 前台上限 ≤10 分钟；OpenCode 的 shell 工具默认只有 **120 秒**）时，前台运行不可用，后台通道又会被 kill。前台 `dispatch --watch`（以及在同一进程内阻塞到落盘的 `run --spec` dispatch 步骤）因此有一条硬要求：**shell 调用必须显式指定 timeout ≥ 对应的看护期限**——`--watch` 取本次派发的总期限（`--timeout × (max-renewals + 1)`，或显式 `--total-timeout`），spec 取全部 dispatch 步骤期限之和——并另留启动与验收余量。被宿主按默认时限切断后 watcher 失明，已脱管的 worker 继续消耗模型，极易被误判失败而重派。此时用**脱管派发**：让 `opencode run` 脱离 harness 任务生命周期独立运行，harness 侧只跑一个纯 shell 观察器等产物。
 
 三步（实证可靠的 Windows 模板）：
 
