@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-11-21
+
+### OpenCode 前台派发超时说明（宿主 shell 默认 120 秒）
+
+#### 变更内容
+- 根因：OpenCode 宿主 shell 工具默认超时 120 秒，而前台 `dispatch --watch` 要阻塞到看门狗总期限（`--timeout × (max-renewals + 1)`，默认 15×2=30 分钟）；未显式指定更长超时的第一次派发即被宿主切断——watcher 失明后已脱管 worker 继续消耗模型，易被误判失败而重派（2026-11-21 aoci-code 会话实证：首次派发在 120 秒被外层 shell 中止）。
+- `SKILL.md` §3「派发与看护」新增硬要求：前台派发的 shell 调用必须显式指定 timeout ≥ 本次派发的总期限（另留启动与验收余量）；给不出足够长的前台超时就改走脱管派发模式。
+- `refs/dispatch-patterns.md`「脱管派发模式」入口条件补充 OpenCode 120 秒默认值与同一硬要求，覆盖前台 `--watch` 的总期限（`--timeout × (max-renewals + 1)` 或显式 `--total-timeout`）与 `run --spec` 全部 dispatch 步骤期限之和。
+
+#### 迁移影响
+- 纯文档与规则表述变更，无代码改动；verify 13/13、audit、492 passed、diff/eol 通过。宿主副本经 cc-switch 更新部署后，编排方按新要求显式指定前台超时。
+
 ## 2026-11-17
 
 ### dsh 0.2.2-rc.3 兼容性核对与旧包迁移说明

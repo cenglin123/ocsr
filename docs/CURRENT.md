@@ -1,9 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-11-17
+更新时间：2026-11-21
 
 ## 当前状态
 
+- 2026-11-21 OpenCode 前台派发超时说明已写入：宿主 shell 工具默认超时 120 秒，小于前台 `--watch` 的看门狗总期限（`--timeout × (max-renewals + 1)`，默认 15×2=30 分钟），未显式指定更长超时的首次派发即被宿主切断（aoci-code 会话实证）。`SKILL.md` §3 与 `refs/dispatch-patterns.md`「脱管派发模式」现要求前台派发的 shell 调用必须显式指定 timeout ≥ 派发总期限（`run --spec` 为全部 dispatch 步骤期限之和），给不出就改走脱管派发。纯文档变更：verify 13/13、audit、492 passed、diff/eol 通过；宿主副本待 cc-switch 部署。
 - 2026-11-17 dsh 0.2.2-rc.3 兼容性核对：`dsh-ocsr@0.2.1` 通过宿主版本门（用 rc.3 的 `evaluatePluginCompatibility` 实测返回可兼容），并以 rc.3 的 `@deepseek-ai/*` 宿主包跑通全部 11 项适配层契约回归，**无需改代码**。旧包 `@ocsr/dsh-ocsr@0.1.x`（peer 锁 `^0.1.1-rc.2`）在 rc.3 上被 skip 属预期（8 项 unmet），升级必须先 `remove @ocsr/dsh-ocsr` 再装 `dsh-ocsr`；`desktop` profile 由 Electron 独占，只能在桌面应用插件管理/市场里操作。本机当前没有任何 profile 安装 OCSR。
 - 进程表读取编码容错（handoff 20261112）已落地：_decode_native（字节读 + UTF-8 优先 + mbcs 兜底 + CRLF 归一化）+ PowerShell 显式 UTF-8 输出；同类 text=True 读取点统一修复。492 passed（487+5），verify 13/13、audit、diff/eol 通过。fresh reviewer（deepseek-flash）REVISE，7 项发现全部修复（含返回码测试真实覆盖续接拒绝、CRLF 归一化等）；报告 `.review/native-decoding-20261112/`。预算 2/2。
 - resume-from 后代检查身份防护（handoff）已落地：PID 复用时只保留原 root 时代的孤儿（当前占用者后代不算残留），不再误拒或诱导误杀；拒绝信息含可读启动时间与命令行并提醒先核对归属。487 passed（482+5），verify 13/13、audit、diff/eol 通过。fresh reviewer（deepseek-flash）REVISE，5 项发现全部修复（含 CommandLine 投影缺失的实质缺陷）；报告 `.review/resume-pid-identity-20261109/`。预算 2/2。
