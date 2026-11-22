@@ -2679,7 +2679,7 @@ class TestResumeFrom:
 
     def test_pwsh_code_records_cwd(self, tmp_path):
         launcher = mod._pwsh_code("-m vendor/model-a", cwd=str(tmp_path))
-        assert f"cwd = '{tmp_path}'" in launcher
+        assert f"cwd = '{mod._native_path_str(tmp_path)}'" in launcher
 
     def test_fresh_dispatch_records_dispatch_cwd(self, tmp_path):
         resume_wd = tmp_path / "unused"
@@ -2688,7 +2688,7 @@ class TestResumeFrom:
         args.work_dir = None  # 未指定 --work-dir：worker 执行目录应为 dispatcher cwd
         assert mod.cmd_dispatch(args) == 0
         launcher = (self.launched[0] / "launcher.ps1").read_text(encoding="utf-8")
-        assert f"cwd = '{Path.cwd()}'" in launcher
+        assert f"cwd = '{mod._native_path_str(Path.cwd())}'" in launcher
 
     def test_rejects_when_recorded_cwd_missing(self, tmp_path, capsys):
         missing = tmp_path / "deleted-worktree"
@@ -2727,7 +2727,7 @@ class TestResumeFrom:
         args = _resume_dispatch_args(tmp_path, resume_wd)
         assert mod.cmd_dispatch(args) == 0
         launcher = (self.launched[0] / "launcher.ps1").read_text(encoding="utf-8")
-        assert f"cwd = '{original}'" in launcher
+        assert f"cwd = '{mod._native_path_str(original)}'" in launcher
 
     def test_records_returned_session_id_when_changed(self, tmp_path, capsys):
         new_wd = tmp_path / "new"

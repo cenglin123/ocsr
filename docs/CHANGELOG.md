@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-11-23
+
+### MSYS PWD 误判、dispatch 输出目录与 preflight 失败诊断
+
+#### 变更内容
+- 根因：git-bash/MSYS 的 `$PWD` 为 `/c/...`，`opencode` 按 `$PWD` 定位工作目录时无法 chdir（`Failed to change directory`）；`preflight` 只根据退出码判失败，把环境错误伪装成「模型不可用」。
+- `_native_path_str` / `_child_env_with_native_pwd` 统一把 Windows 侧路径规范为原生 `C:/...`（MSYS 盘符路径转换 + 绝对化），POSIX 原样返回；`_pwsh_code` 的工作目录与 `session-binding.json` 的 `cwd` 使用同一规范值，launcher 在 `Set-Location` 后显式设置 `$env:PWD`；`_launch_worker` 启动 pwsh 时也传入原生 `PWD`。
+- `dispatch --output-dir` 目录不存在时用 `mkdir(parents=True, exist_ok=True)` 自动创建，仅创建失败或路径已是文件时报错退出。
+- `preflight` 非零退出输出实际退出码与 stderr 末尾若干行（最多 8 行 / 800 字符）；chdir 类错误标为 `env_error:chdir(exit_N)`，汇总时明确区分环境错误与模型不可用。
+- 新增 `tests/test_preflight_native_pwd.py` 8 项离线回归（路径规范化、preflight launcher 的 cwd/PWD、`_launch_worker` 子进程环境、输出目录自建与文件拒绝、环境错误与非零退出诊断、stderr 截断）；既有 3 项 cwd 记录断言改用规范值。
+
+#### 迁移影响
+- Windows 派发不再依赖调用方 shell 的 `PWD` 形式；Linux/macOS 行为不变。产物目录可指向尚不存在的路径。preflight 失败信息更具体，退出码契约不变。
+
 ## 2026-11-21
 
 ### OpenCode 前台派发超时说明（宿主 shell 默认 120 秒）

@@ -338,6 +338,50 @@ def _resolve_timeout_policy(policy: str, role: str) -> str:
 
 
 # ─── 工具 ────────────────────────────────────────────────────────────
+_MSYS_DRIVE_PATH = re.compile(r"^/([A-Za-z])(?:/(.*))?$")
+
+# Node/opencode 在这类错误里暴露的 chdir 失败标志（环境错误，不是模型不可用）。
+_CHDIR_FAILURE_MARKERS = (
+    "failed to change directory",
+    "cannot change directory",
+    "can't change directory",
+    "unable to change directory",
+    "chdir",
+)
+
+
+def _native_path_str(path: "str | os.PathLike | None" = None) -> str:
+    """把路径转成子进程可用的原生绝对路径字符串。
+
+    git-bash/MSYS 的 ``$PWD`` 是 ``/c/...`` 形式，``opencode`` 按 ``$PWD`` 定位
+    工作目录时无法 chdir（报 ``Failed to change directory``）。Windows 下统一转成
+    ``C:/...`` 形式；POSIX 原样返回，不改变既有的 Linux/macOS 行为。
+    """
+    raw = os.fspath(path) if path is not None else os.getcwd()
+    text = str(raw)
+    if sys.platform != "win32":
+        return text
+    match = _MSYS_DRIVE_PATH.match(text)
+    if match:
+        drive = match.group(1).upper()
+        rest = (match.group(2) or "").replace("/", "\\")
+        text = f"{drive}:\\{rest}" if rest else f"{drive}:\\"
+    try:
+        absolute = os.path.abspath(text)
+    except (OSError, ValueError):
+        absolute = text
+    return absolute.replace("\\", "/")
+
+
+def _child_env_with_native_pwd(path: "str | os.PathLike | None" = None) -> dict[str, str] | None:
+    """返回把 ``PWD`` 规范成原生路径的子进程环境；POSIX 返回 None（继承原环境）。"""
+    if sys.platform != "win32":
+        return None
+    env = dict(os.environ)
+    env["PWD"] = _native_path_str(path)
+    return env
+
+
 def _pwsh_code(text: str, cwd: str | None = None) -> str:
     """生成 launcher，流式保存 JSON 并绑定唯一 sessionID 与工作目录。
 
@@ -354,7 +398,7 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
     # skill updates. The job is owned by pwsh, never by the dispatcher.
     job_source = (Path(__file__).with_name("ocsr_launcher_job.cs")).read_bytes()
     job_source_b64 = base64.b64encode(job_source).decode("ascii")
-    worker_cwd = cwd or str(Path.cwd())
+    worker_cwd = _native_path_str(cwd if cwd is not None else Path.cwd())
     cwd_literal = worker_cwd.replace("'", "''")
     return textwrap.dedent(f"""\
         if ($env:OCSR_DISABLE_MODEL_CALLS -eq '1') {{
@@ -378,6 +422,7 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
             [OcsrLauncherJob]::AttachCurrentProcess()
           }}
           Set-Location -LiteralPath '{cwd_literal}'
+          $env:PWD = '{cwd_literal}'
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
           $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
           & opencode run $prompt --format json --standalone {text} '{cwd_literal}' 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
@@ -422,7 +467,7 @@ def _write_utf8(path: Path, content: str) -> None:
 PID_FILE_NAME = "pid.txt"
 
 
-def _spawn_windowless(args: list[str]) -> subprocess.Popen:
+def _spawn_windowless(args: list[str], env: dict[str, str] | None = None) -> subprocess.Popen:
     """以**不分配 console 窗口 + 不继承父进程句柄**的方式启动进程（Windows 关键）。
 
     为什么弃用 `Start-Process`：
@@ -450,6 +495,7 @@ def _spawn_windowless(args: list[str]) -> subprocess.Popen:
         stderr=subprocess.DEVNULL,
         close_fds=True,
         creationflags=flags,
+        env=env,
     )
 
 
@@ -460,7 +506,8 @@ def _launch_worker(wd: Path) -> int:
     看门狗只接受这里捕获的真实 PID；watcher 自身不负责恢复或再次拉起 worker。
     """
     proc = _spawn_windowless(
-        ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wd / "launcher.ps1")]
+        ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wd / "launcher.ps1")],
+        env=_child_env_with_native_pwd(wd),
     )
     (wd / PID_FILE_NAME).write_text(f"{proc.pid}\n", encoding="ascii")
     return proc.pid
@@ -1836,9 +1883,15 @@ def _dispatch_batch(
             print(f"❌ prompt 文件不存在: {w['prompt_file']}", file=sys.stderr)
             return 1
         w.setdefault("prompt_size_bytes", _resolve_prompt_size(w["prompt_file"]))
-    if not output_dir.is_dir():
-        print(f"❌ 输出目录不存在: {output_dir}", file=sys.stderr)
+    if output_dir.exists() and not output_dir.is_dir():
+        print(f"❌ 输出目录不存在: {output_dir}（该路径已存在且不是目录）", file=sys.stderr)
         return 1
+    if not output_dir.is_dir():
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"❌ 无法创建输出目录: {output_dir}: {exc}", file=sys.stderr)
+            return 1
 
     parsed = workers
     ledger = _converge_ledger_path(output_dir, ledger_dir)
@@ -3510,6 +3563,32 @@ def cmd_run(args) -> int:
 
 # ─── preflight 子命令 ─────────────────────────────────────────────────
 
+def _preflight_stderr_tail(text: str, max_lines: int = 8, max_chars: int = 800) -> list[str]:
+    """stderr 末尾若干非空行，限制总字符数；用于失败诊断，避免只报状态码。"""
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+             if line.strip()]
+    if not lines:
+        return []
+    tail = lines[-max_lines:]
+    joined = "\n".join(tail)
+    if len(joined) > max_chars:
+        tail = joined[-max_chars:].split("\n")
+    return tail
+
+
+def _classify_preflight_status(exit_code: int, diagnostic_text: str) -> str:
+    """把非零退出分成三类：环境错误（chdir/PWD）、404、其它失败。
+
+    环境错误不是模型不可用；单独标注，避免把 MSYS 的 ``$PWD`` 问题误判成模型不可用。
+    """
+    lowered = diagnostic_text.lower()
+    if any(marker in lowered for marker in _CHDIR_FAILURE_MARKERS):
+        return f"env_error:chdir(exit_{exit_code})"
+    if "404" in diagnostic_text or "not found" in lowered:
+        return "404"
+    return f"error:exit_{exit_code}"
+
+
 def cmd_preflight(args) -> int:
     """批量探测模型通道可用性。用与真实派发相同的机制（opencode run -m <model>）。"""
     _check_model_calls_disabled()
@@ -3554,19 +3633,23 @@ def cmd_preflight(args) -> int:
         log_file = wd / "run.log"
         if log_file.is_file():
             log_text = log_file.read_text(encoding="utf-8", errors="replace")[:500]
+        stderr_text = ""
         stderr_file = wd / "stderr.log"
         if stderr_file.is_file():
-            log_text = stderr_file.read_text(encoding="utf-8-sig", errors="replace")[:500] + "\n" + log_text
+            stderr_text = stderr_file.read_text(encoding="utf-8-sig", errors="replace")
+            log_text = stderr_text[:500] + "\n" + log_text
         if exit_code is None:
             status = "timeout"
         elif exit_code == 0:
             status = "available"
-        elif "404" in log_text or "not found" in log_text.lower():
-            status = "404"
         else:
-            status = f"error:exit_{exit_code}"
+            status = _classify_preflight_status(exit_code, stderr_text + "\n" + log_text)
         results[model] = status
         print(f"[preflight] {model}: {status}")
+        if exit_code not in (None, 0):
+            print(f"[preflight]   exit={exit_code}")
+            for line in _preflight_stderr_tail(stderr_text):
+                print(f"[preflight]   stderr: {line}")
 
     all_ok = all(v == "available" for v in results.values())
     if all_ok:
@@ -3574,7 +3657,11 @@ def cmd_preflight(args) -> int:
         return 0
     else:
         failed = [m for m, s in results.items() if s != "available"]
-        print(f"[preflight] {len(failed)}/{len(models)} 个模型不可用: {failed}")
+        env_failed = [m for m, s in results.items() if s.startswith("env_error")]
+        print(f"[preflight] {len(failed)}/{len(models)} 个模型未通过探测: {failed}")
+        if env_failed:
+            print(f"[preflight] 其中环境错误（不是模型不可用）: {env_failed}；"
+                  f"请检查 PWD/cwd 是否为原生路径")
         return 1
 
 
