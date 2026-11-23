@@ -106,8 +106,8 @@ def _read_exit_code(marker: Path) -> int | None:
 def _worker_fingerprint(wd: Path) -> tuple:
     """关键文件的 (mtime_ns, size) 指纹；未变则无需重读内容。"""
     fp = []
-    for name in ("worker-state.json", "session-binding.json", "start.marker",
-                 "launcher.ps1", "run.log"):
+    for name in ("worker-state.json", "session-binding.json", "dispatch-meta.json",
+                 "start.marker", "launcher.ps1", "run.log"):
         try:
             st = (wd / name).stat()
             fp.append((st.st_mtime_ns, st.st_size))
@@ -202,16 +202,22 @@ def _scan_worker_dir_fresh(wd: Path, dispatch_name: str, started: datetime | Non
     label = state.get("label")
     if not isinstance(label, str) or not label:
         label = wd.name  # 非字符串或空 label 用目录名兜底，避免绑定阶段按字典键抛错
+    dispatch_meta = _load_json(wd / "dispatch-meta.json")
+    meta_model = dispatch_meta.get("cli_model") if isinstance(dispatch_meta, dict) else None
+    meta_backend = dispatch_meta.get("backend") if isinstance(dispatch_meta, dict) else None
+    resolved_model = meta_model.strip() if isinstance(meta_model, str) and meta_model.strip() else _extract_model(wd / "launcher.ps1")
+    resolved_backend = meta_backend.strip() if isinstance(meta_backend, str) and meta_backend.strip() else (binding.get("backend") or "opencode")
     return {
         "key": f"{root_tag}/{dispatch_name}/{wd.name}" if root_tag else f"{dispatch_name}/{wd.name}",
         "label": label,
         "dir": str(wd),
+        "backend": resolved_backend,
         "state": raw_state,
         "badge": badge,
         "badge_text": badge_text,
         "session_id": binding.get("session_id") or "",
         "cwd": binding.get("cwd") or "",
-        "model": _extract_model(wd / "launcher.ps1"),
+        "model": resolved_model,
         "started_at": started_at.isoformat() if started_at else "",
         "duration_min": duration_min,
         "total_deadline": state.get("total_deadline"),

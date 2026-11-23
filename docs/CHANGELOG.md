@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026-11-24
+
+### 多后端执行抽象与 Codex CLI 后端（Phase 0/1/2/2.5）
+
+#### 变更内容
+- 新增 `scripts/ocsr_backends.py`：定义 `BackendAdapter`、`OpenCodeAdapter`、`CodexAdapter`、`ExecutionConfig` 统一校验与版本化 `dispatch-meta.json`（`schema_version: 1`），采用独立白名单 `~/.ocsr/allowed-codex-models.json`（`OCSR_CODEX_ALLOWED_MODELS_PATH` 可覆盖），保持 `backend / provider / model / family` 正交。
+- `scripts/ocsr_dispatch.py`：保留单一通用 launcher 骨架（`KILL_ON_JOB_CLOSE`、`process-identity.json`、`start.marker`），支持 `--backend`、`--sandbox`、`--reasoning-effort`、`--artifact-mode`（`read-only` 默认 `capture-reply`，退出码 0 且非空时 UTF-8 无 BOM 原子落盘）；`_extract_session_ids` / `_read_session_binding` 委托后端解析 `sessionID`/`thread_id` 并保持完整交叉校验；`--resume-from` 强制核对 `backend`/`model`/`sandbox`/`artifact_mode` 一致，禁止静默扩权；`diagnose` 在 `codex` 后端使用事件阶段映射且跳过 OpenCode SQLite。
+- `scripts/ocsr_run_spec.py` 与 `cmd_run`：正式支持并强校验 `backend`/`sandbox`/`reasoning_effort`/`artifact_mode` 字段并透传至 `_dispatch_batch`；非法组合在校验期即 fail-closed。
+- `scripts/ocsr_board.py`：优先读取 `dispatch-meta.json` 展示 `backend` 与 `cli_model`（旧目录回退 `-m` 正则），并将 `dispatch-meta.json` 纳入目录指纹缓存键。
+- `lib/tool-ocsr.js`：Phase 2A 显式 fail-closed 拒绝非 `opencode` 后端与 Codex 专属参数，不静默忽略或降级。
+- 新增 `tests/test_codex_backend.py` 11 项离线契约测试；完成 Phase 0（3 次真实探测）与 Phase 2.5（1 次端到端 `dispatch --backend codex --sandbox read-only --watch`）Windows 实证。
+
+#### 迁移影响
+- 不传 `--backend` 时默认行为、白名单（`~/.ocsr/allowed-models.json`）、退出码与既有 500 项测试 100% 兼容。使用 `codex` 后端前需在 `~/.ocsr/allowed-codex-models.json` 配置经验证的模型条目。`SKILL.md` / `docs/overview.md` 治理文档同步与外部 `converge` 适配层升级留待 Phase 3 走 `ultraverge` 后推进。
+
 ## 2026-11-23
 
 ### MSYS PWD 误判、dispatch 输出目录与 preflight 失败诊断

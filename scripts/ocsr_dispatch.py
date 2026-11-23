@@ -43,6 +43,11 @@ import textwrap
 import time
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+import ocsr_backends as _backends
+
 # ─── Windows UTF-8 ───────────────────────────────────────────────────
 if sys.platform == "win32":
     try:
@@ -273,6 +278,53 @@ _CONFIGURED_MODELS = _load_allowed_models()
 ALLOWED_MODELS = frozenset(_CONFIGURED_MODELS)
 DEFAULT_MODEL = _CONFIGURED_MODELS[0] if _CONFIGURED_MODELS else None
 
+CODEX_ALLOWED_MODELS_PATH = _backends.default_codex_allowed_models_path(OCSR_HOME)
+CODEX_ALLOWED_MODELS = _backends.load_codex_allowed_models(CODEX_ALLOWED_MODELS_PATH)
+DEFAULT_CODEX_MODEL = next(iter(CODEX_ALLOWED_MODELS), None)
+DISPATCH_META_FILE = _backends.DISPATCH_META_FILE
+
+
+def _validate_execution_config(
+    *,
+    backend: str | None,
+    model: str,
+    work_dir: str,
+    sandbox: str | None = None,
+    reasoning_effort: str | None = None,
+    artifact_mode: str | None = None,
+    expected_output: Path | None = None,
+) -> _backends.ExecutionConfig:
+    """统一入口校验：opencode 经 _validate_model_allowed（兼容旧测试 monkeypatch），codex 读 CODEX_ALLOWED_MODELS。"""
+    resolved_backend = (backend or _backends.BACKEND_OPENCODE).strip()
+    if resolved_backend == _backends.BACKEND_OPENCODE:
+        _validate_model_allowed(model)
+        return _backends.validate_execution_config(
+            backend=resolved_backend,
+            model=model,
+            work_dir=work_dir,
+            sandbox=sandbox,
+            reasoning_effort=reasoning_effort,
+            artifact_mode=artifact_mode,
+            expected_output=expected_output,
+            opencode_allowed_models=ALLOWED_MODELS | {model},
+            codex_allowed_models=CODEX_ALLOWED_MODELS,
+            opencode_unconfigured_msg=UNCONFIGURED_GUIDANCE,
+            codex_allowlist_path=CODEX_ALLOWED_MODELS_PATH,
+        )
+    return _backends.validate_execution_config(
+        backend=resolved_backend,
+        model=model,
+        work_dir=work_dir,
+        sandbox=sandbox,
+        reasoning_effort=reasoning_effort,
+        artifact_mode=artifact_mode,
+        expected_output=expected_output,
+        opencode_allowed_models=ALLOWED_MODELS,
+        codex_allowed_models=CODEX_ALLOWED_MODELS,
+        opencode_unconfigured_msg=UNCONFIGURED_GUIDANCE,
+        codex_allowlist_path=CODEX_ALLOWED_MODELS_PATH,
+    )
+
 
 def _validate_model_allowed(model: str) -> None:
     """Validate model is in the OCSR allowlist. Raises ValueError with clear error."""
@@ -382,24 +434,55 @@ def _child_env_with_native_pwd(path: "str | os.PathLike | None" = None) -> dict[
     return env
 
 
-def _pwsh_code(text: str, cwd: str | None = None) -> str:
-    """生成 launcher，流式保存 JSON 并绑定唯一 sessionID 与工作目录。
+def _pwsh_code(
+    text: str,
+    cwd: str | None = None,
+    *,
+    backend: str = _backends.BACKEND_OPENCODE,
+    command_line: str | None = None,
+    capture_output_path: str | None = None,
+) -> str:
+    """生成通用 launcher，保留统一 Job/身份/日志/marker 协议并按后端注入命令与 session 提取。
 
-    ``session-binding.json`` 只在同一次 ``opencode run --format json`` 的顶层
-    ``sessionID`` 唯一时存在；其中的 ``cwd`` 记录 worker 的工作目录（绝对路径），
-    供 ``--resume-from`` 在启动前核对。缺失或歧义只禁止后续 resume，不改变本次
-    ``opencode`` 的真实退出码；watcher 不会查询 SQLite 或猜测目录中的“最新 session”。
-
-    ``--standalone``：每个 worker 用私有服务器。默认会连接（必要时拉起）常驻后台服务，
-    服务按工作目录常驻 MCP 子进程且不随 run 结束释放，worker 目录因此被占用、无法删除。
+    ``session-binding.json`` 只在同一次 JSONL 事件流中顶层 session 字段（opencode 为
+    ``sessionID``，codex 为 ``thread_id``）唯一时存在；其中的 ``cwd`` 记录 worker
+    的工作目录（绝对路径），供 ``--resume-from`` 在启动前核对。缺失或歧义只禁止后续
+    resume，不改变本次后端的真实退出码；watcher 不会查询 SQLite 或猜测“最新 session”。
     """
-    command_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    adapter = _backends.get_backend_adapter(backend)
+    fingerprint_source = command_line if command_line is not None else text
+    command_fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
     # Embed the helper so dispatched launchers remain self-contained across
     # skill updates. The job is owned by pwsh, never by the dispatcher.
     job_source = (Path(__file__).with_name("ocsr_launcher_job.cs")).read_bytes()
     job_source_b64 = base64.b64encode(job_source).decode("ascii")
     worker_cwd = _native_path_str(cwd if cwd is not None else Path.cwd())
     cwd_literal = worker_cwd.replace("'", "''")
+    exec_line = (
+        command_line
+        if command_line is not None
+        else f"& opencode run $prompt --format json --standalone {text} '{cwd_literal}'"
+    )
+    sid_field = adapter.session_id_field
+    capture_block = ""
+    if capture_output_path:
+        cap_literal = _native_path_str(capture_output_path).replace("'", "''")
+        capture_block = textwrap.dedent(f"""\
+          if ($opencodeExit -eq 0 -and (Test-Path -LiteralPath "$PSScriptRoot/last-message.tmp" -PathType Leaf)) {{
+            $capturedText = Get-Content -LiteralPath "$PSScriptRoot/last-message.tmp" -Raw -Encoding UTF8
+            if (-not [string]::IsNullOrWhiteSpace($capturedText)) {{
+              $targetPath = '{cap_literal}'
+              $targetDir = Split-Path -Parent $targetPath
+              if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {{
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+              }}
+              $atomicTmp = "$targetPath.ocsr.tmp.$PID"
+              [System.IO.File]::WriteAllText($atomicTmp, $capturedText, [Text.UTF8Encoding]::new($false))
+              Move-Item -LiteralPath $atomicTmp -Destination $targetPath -Force
+            }}
+          }}
+        """)
+        capture_block = "\n".join("          " + ln if ln else "" for ln in capture_block.splitlines()) + "\n"
     return textwrap.dedent(f"""\
         if ($env:OCSR_DISABLE_MODEL_CALLS -eq '1') {{
             "launcher blocked: OCSR_DISABLE_MODEL_CALLS=1" | Set-Content "$PSScriptRoot/error.log"
@@ -425,17 +508,18 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
           $env:PWD = '{cwd_literal}'
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
           $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
-          & opencode run $prompt --format json --standalone {text} '{cwd_literal}' 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
+          {exec_line} 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
             $line = [string]$_
             $line | Add-Content "$PSScriptRoot/run.log" -Encoding UTF8
             try {{
               $event = $line | ConvertFrom-Json -ErrorAction Stop
-              $sessionProperty = $event.PSObject.Properties['sessionID']
+              $sessionProperty = $event.PSObject.Properties['{sid_field}']
               if ($null -ne $sessionProperty -and $sessionProperty.Value -is [string] -and $sessionProperty.Value.Trim()) {{
                 [void]$sessionIDs.Add($sessionProperty.Value.Trim())
                 if ($sessionIDs.Count -eq 1) {{
                   $binding = [ordered]@{{
                     session_id = @($sessionIDs)[0]
+                    backend = '{adapter.name}'
                     cwd = '{cwd_literal}'
                     pid = $identity.pid
                     creation_time = $identity.creation_time
@@ -452,7 +536,7 @@ def _pwsh_code(text: str, cwd: str | None = None) -> str:
           if ($sessionIDs.Count -ne 1) {{
             Remove-Item "$PSScriptRoot/session-binding.json" -Force -ErrorAction SilentlyContinue
           }}
-          "exit=$opencodeExit" | Add-Content "$PSScriptRoot/start.marker"
+{capture_block}          "exit=$opencodeExit" | Add-Content "$PSScriptRoot/start.marker"
         }} catch {{
           $_ | Out-File "$PSScriptRoot/error.log" -Encoding UTF8
           "exit=1" | Add-Content "$PSScriptRoot/start.marker"
@@ -583,24 +667,29 @@ def _read_event_log(log_file: Path) -> tuple[list[dict], dict]:
     return events, quality
 
 
-def _extract_session_ids(log_file: Path) -> tuple[set[str], int, dict | None]:
-    """只解析 JSONL 顶层 ``sessionID``，同时返回有效事件数和最后事件。"""
-    ids: set[str] = set()
-    event_count = 0
-    last_event: dict | None = None
+def _detect_worker_backend(wd: Path) -> str:
+    """从 dispatch-meta.json 或 session-binding.json 识别后端；旧目录默认 opencode。"""
+    meta = _backends.read_dispatch_meta(wd)
+    if meta and isinstance(meta.get("backend"), str) and meta["backend"] in _backends.SUPPORTED_BACKENDS:
+        return meta["backend"]
+    binding = _read_json_object(wd / SESSION_BINDING_FILE)
+    if binding and isinstance(binding.get("backend"), str) and binding["backend"] in _backends.SUPPORTED_BACKENDS:
+        return binding["backend"]
+    return _backends.BACKEND_OPENCODE
+
+
+def _extract_session_ids(log_file: Path, backend: str | None = None) -> tuple[set[str], int, dict | None]:
+    """委托 BackendAdapter 解析 JSONL 顶层 session 字段（opencode=sessionID, codex=thread_id）。"""
+    resolved_backend = backend or _detect_worker_backend(log_file.parent)
+    adapter = _backends.get_backend_adapter(resolved_backend)
     events, _quality = _read_event_log(log_file)
-    for event in events:
-        event_count += 1
-        last_event = event
-        candidate = event.get("sessionID")
-        if isinstance(candidate, str) and candidate.strip():
-            ids.add(candidate.strip())
-    return ids, event_count, last_event
+    return adapter.extract_session_ids(events)
 
 
 def _read_session_binding(wd: Path) -> tuple[str, str]:
     """返回 ``(status, session_id)``；任何歧义或身份不一致都 fail-closed。"""
-    ids, _count, _last = _extract_session_ids(wd / "run.log")
+    backend = _detect_worker_backend(wd)
+    ids, _count, _last = _extract_session_ids(wd / "run.log", backend=backend)
     if len(ids) > 1:
         return "ambiguous", ""
     if not ids:
@@ -655,13 +744,18 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
 
 def _read_dispatch_model(wd: Path) -> str:
-    """从原派发目录的 launcher.ps1 读取 ``-m <model>``；读不到返回空串。"""
+    """优先从 dispatch-meta.json 读取 cli_model；旧目录回退 launcher.ps1 的 ``-m <model>``。"""
+    meta = _backends.read_dispatch_meta(wd)
+    if meta:
+        cli_model = meta.get("cli_model")
+        if isinstance(cli_model, str) and cli_model.strip():
+            return cli_model.strip()
     try:
         text = (wd / "launcher.ps1").read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return ""
     for line in text.splitlines():
-        if "opencode run" not in line:
+        if "opencode run" not in line and "codex exec" not in line:
             continue
         match = re.search(r"(?:^|\s)-m\s+(\S+)", line)
         if match:
@@ -728,9 +822,13 @@ def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
     cwd = raw_cwd.strip() if isinstance(raw_cwd, str) else ""
     if cwd and not Path(cwd).is_absolute():
         cwd = ""
+    meta_obj = _backends.read_dispatch_meta(wd)
+    backend = _detect_worker_backend(wd)
+    if not cwd and meta_obj and isinstance(meta_obj.get("work_dir"), str) and Path(meta_obj["work_dir"]).is_absolute():
+        cwd = meta_obj["work_dir"].strip()
     model = _read_dispatch_model(wd)
     if not model:
-        return None, "无法核对原派发模型：launcher.ps1 中找不到 -m，拒绝续接"
+        return None, "无法核对原派发模型：dispatch-meta.json 与 launcher.ps1 中均找不到模型，拒绝续接"
     state_obj = _read_json_object(wd / WORKER_STATE_FILE)
     state = state_obj or {}
     raw_attempt = state.get("attempt_index")
@@ -752,7 +850,12 @@ def _read_resume_context(resume_dir: Path) -> tuple[dict | None, str]:
         "session_id": session_id,
         "pid": binding_pid,
         "creation_time": creation_time,
+        "backend": backend,
         "model": model,
+        "sandbox": meta_obj.get("sandbox_requested") if meta_obj else None,
+        "artifact_mode": meta_obj.get("artifact_mode") if meta_obj else _backends.ARTIFACT_MODE_WORKER_WRITE,
+        "reasoning_effort": meta_obj.get("reasoning_effort_requested") if meta_obj else None,
+        "has_dispatch_meta": meta_obj is not None,
         "cwd": cwd,
         "attempt_index": original_attempt,
         "rework_index": original_rework,
@@ -1150,29 +1253,34 @@ def _worker_diagnostics(wd: Path, now: float | None = None,
                         session_db: Path | None = None) -> dict:
     """Derived evidence, never a diagnosis of provider internals or task success."""
     now = time.time() if now is None else now
+    backend = _detect_worker_backend(wd)
     events, quality = _read_event_log(wd / "run.log")
     last = events[-1] if events else {}
     timestamp = _event_timestamp(last)
     event_time = _timestamp_seconds(timestamp)
     kind = str(last.get("type") or "").replace("-", "_")
     phase_time = event_time
-    phase = {"step_start": "generation_pending", "step_finish": "between_steps",
-             "error": "error_reported", "text": "text_emitted",
-             "reasoning": "reasoning_emitted"}.get(kind, "event_observed_unknown_phase" if events else "not_observed")
-    observation = _tool_event_observation(last)
-    if observation is None and kind in {"step_start", "step_finish"}:
-        for event in reversed(events):
-            recent_tool = _tool_event_observation(event)
-            if recent_tool is not None:
-                if recent_tool["status"] in {"running", "pending", "streaming"}:
-                    observation = recent_tool
-                    phase_time = _timestamp_seconds(_event_timestamp(event))
-                break
-    if observation is not None:
-        phase = {"running": "tool_running", "pending": "tool_pending",
-                 "streaming": "tool_call_streaming", "completed": "tool_completed",
-                 "error": "tool_error_reported"}.get(observation["status"], "tool_state_unknown")
-    result = {"schema_version": 1, "captured_at": now, "log": quality,
+    if backend == _backends.BACKEND_CODEX:
+        adapter = _backends.get_backend_adapter(backend)
+        phase = adapter.parse_phase(events) if events else "not_observed"
+    else:
+        phase = {"step_start": "generation_pending", "step_finish": "between_steps",
+                 "error": "error_reported", "text": "text_emitted",
+                 "reasoning": "reasoning_emitted"}.get(kind, "event_observed_unknown_phase" if events else "not_observed")
+        observation = _tool_event_observation(last)
+        if observation is None and kind in {"step_start", "step_finish"}:
+            for event in reversed(events):
+                recent_tool = _tool_event_observation(event)
+                if recent_tool is not None:
+                    if recent_tool["status"] in {"running", "pending", "streaming"}:
+                        observation = recent_tool
+                        phase_time = _timestamp_seconds(_event_timestamp(event))
+                    break
+        if observation is not None:
+            phase = {"running": "tool_running", "pending": "tool_pending",
+                     "streaming": "tool_call_streaming", "completed": "tool_completed",
+                     "error": "tool_error_reported"}.get(observation["status"], "tool_state_unknown")
+    result = {"schema_version": 1, "backend": backend, "captured_at": now, "log": quality,
               "last_phase": phase, "phase_source": "cli" if events else "unknown",
               "last_event_timestamp": timestamp,
               "last_event_type": kind,
@@ -1181,8 +1289,8 @@ def _worker_diagnostics(wd: Path, now: float | None = None,
               "phase_age_seconds": max(0, round(now - phase_time, 3)) if phase_time is not None and phase_time <= now else None,
               "root_cause": "unknown",
               "observation_limit": "CLI silence does not prove a model hang; generation/queue/network/permission waits may be unobserved.",
-              "native_session": {"status": "not_requested"}}
-    if session_db is not None:
+              "native_session": {"status": "not_applicable_for_codex" if backend == _backends.BACKEND_CODEX else "not_requested"}}
+    if session_db is not None and backend != _backends.BACKEND_CODEX:
         native = _read_native_session_metadata(wd, session_db)
         result["native_session"] = native
         native_time = _timestamp_seconds(native.get("updated_at_ms"))
@@ -1243,8 +1351,17 @@ def _write_resume_material(
         and attempt_index < MAX_ATTEMPTS
         and session_status == "available"
     )
+    backend = str(p.get("backend") or _detect_worker_backend(wd))
+    adapter = _backends.get_backend_adapter(backend)
+    meta_for_resume = _backends.read_dispatch_meta(wd) or {
+        "cli_model": p["model"],
+        "work_dir": str(p.get("execution_dir") or Path.cwd()),
+        "sandbox_requested": p.get("sandbox"),
+        "reasoning_effort_requested": p.get("reasoning_effort"),
+    }
     material = {
         "schema": "ocsr-resume-material-v1",
+        "backend": backend,
         "resume_eligible": eligible,
         "reason": "eligible" if eligible else (
             "old_process_stop_unverified" if not old_process_stop_verified else
@@ -1263,11 +1380,7 @@ def _write_resume_material(
         "execution_dir": str(p.get("execution_dir") or Path.cwd()),
         "expected_output": str(p["output"]),
         "resume_argv": (
-            [
-                "opencode", "run", "<RESUME_PROMPT>", "--format", "json", "--standalone",
-                "--session", session_id, "-m", p["model"],
-                "--dir", str(p.get("execution_dir") or Path.cwd()),
-            ] if eligible else []
+            adapter.build_resume_argv(meta_for_resume, session_id) if eligible else []
         ),
     }
     _write_utf8(wd / RESUME_MATERIAL_FILE,
@@ -1869,16 +1982,31 @@ def _dispatch_batch(
     if not workers:
         print("❌ _dispatch_batch: worker 列表为空", file=sys.stderr)
         return 1
+    exec_dir_str = binding_cwd or str(_resolve_execution_dir(work_dir))
+    exec_configs: list[_backends.ExecutionConfig] = []
     for i, w in enumerate(workers):
         for key in ("prompt_file", "model", "label", "output"):
             if not w.get(key):
                 print(f"❌ _dispatch_batch: worker[{i}] 缺少必填字段 `{key}`", file=sys.stderr)
                 return 1
         try:
-            _validate_model_allowed(w["model"])
+            cfg = _validate_execution_config(
+                backend=w.get("backend"),
+                model=w["model"],
+                work_dir=exec_dir_str,
+                sandbox=w.get("sandbox"),
+                reasoning_effort=w.get("reasoning_effort"),
+                artifact_mode=w.get("artifact_mode"),
+                expected_output=Path(w["output"]),
+            )
         except ValueError as e:
             print(f"❌ {e}", file=sys.stderr)
             return 1
+        w["backend"] = cfg.backend
+        w["sandbox"] = cfg.sandbox
+        w["reasoning_effort"] = cfg.reasoning_effort
+        w["artifact_mode"] = cfg.artifact_mode
+        exec_configs.append(cfg)
         if not Path(w["prompt_file"]).is_file():
             print(f"❌ prompt 文件不存在: {w['prompt_file']}", file=sys.stderr)
             return 1
@@ -1933,12 +2061,44 @@ def _dispatch_batch(
             prompt_content = prompt_content.rstrip("\n") + "\n\n" + _build_forbid_block(forbid_paths)
         _write_utf8(wd / "prompt.txt", prompt_content)
 
-        # 生成 launcher
-        safe_label = re.sub(r'[^\w一-鿿-]', '_', str(p['label']))[:30]
-        session_arg = f"--session {p['resume_session']} " if p.get("resume_session") else ""
-        model_arg = f'{session_arg}-m {p["model"]} --title "ocsr-{safe_label}"'
-        _write_utf8(wd / "launcher.ps1",
-                    _pwsh_code(model_arg, cwd=binding_cwd or str(_resolve_execution_dir(work_dir))))
+        # 写入版本化 dispatch-meta.json（供 resume / board / diagnose 读取）
+        cfg = exec_configs[i]
+        _backends.write_dispatch_meta(wd, cfg)
+
+        # 生成 launcher（统一骨架 + 后端命令片段）
+        adapter = _backends.get_backend_adapter(cfg.backend)
+        worker_cwd = _native_path_str(exec_dir_str)
+        cwd_literal = worker_cwd.replace("'", "''")
+        capture_output_path = (
+            str(p["output"])
+            if cfg.artifact_mode == _backends.ARTIFACT_MODE_CAPTURE_REPLY
+            else None
+        )
+        capture_tmp_expr = '"$PSScriptRoot/last-message.tmp"' if capture_output_path else ""
+        if cfg.backend == _backends.BACKEND_OPENCODE:
+            safe_label = re.sub(r'[^\w一-鿿-]', '_', str(p['label']))[:30]
+            session_arg = f"--session {p['resume_session']} " if p.get("resume_session") else ""
+            model_arg = f'{session_arg}-m {p["model"]} --title "ocsr-{safe_label}"'
+            _write_utf8(wd / "launcher.ps1",
+                        _pwsh_code(model_arg, cwd=exec_dir_str, backend=cfg.backend))
+        else:
+            cmd_fragment = adapter.build_command_fragment(
+                cfg,
+                label=str(p["label"]),
+                cwd_literal=cwd_literal,
+                resume_session=str(p.get("resume_session") or ""),
+                capture_tmp_expr=capture_tmp_expr,
+            )
+            _write_utf8(
+                wd / "launcher.ps1",
+                _pwsh_code(
+                    cmd_fragment,
+                    cwd=exec_dir_str,
+                    backend=cfg.backend,
+                    command_line=cmd_fragment,
+                    capture_output_path=capture_output_path,
+                ),
+            )
 
         if progress:
             print(f"[ocsr] [{i+1}/{len(parsed)}] 已就绪: {p['label']} ({p['model']}) → {p['output']}")
@@ -1966,6 +2126,7 @@ def _dispatch_batch(
         # 后续 --resume-from 会看不到本次尝试序号而绕过三次总上限。
         _write_worker_state(wd, {
             "state": "launched",
+            "backend": parsed[i].get("backend", _backends.BACKEND_OPENCODE),
             "label": parsed[i]["label"],
             "inspection_deadline": start_times[i] + timeout_min * 60,
             "total_deadline": start_times[i] + total_timeout_min * 60,
@@ -1988,6 +2149,7 @@ def _dispatch_batch(
         launched_row: dict[str, object] = {
             "event": "launched",
             "batch_id": batch_id,
+            "backend": parsed[i].get("backend", _backends.BACKEND_OPENCODE),
             "label": parsed[i]["label"],
             "model": parsed[i]["model"],
             "harness": harness_tag,
@@ -2089,6 +2251,13 @@ def cmd_dispatch(args) -> int:
     forbid_paths = [fp.strip() for fp in (getattr(args, "forbid_paths", None) or [])
                     if fp and fp.strip()]
 
+    backend_arg = getattr(args, "backend", None) or _backends.BACKEND_OPENCODE
+    sandbox_arg = getattr(args, "sandbox", None)
+    reasoning_arg = getattr(args, "reasoning_effort", None)
+    artifact_mode_arg = getattr(args, "artifact_mode", None)
+    work_dir_arg = getattr(args, "work_dir", None)
+    exec_dir_preview = str(_resolve_execution_dir(Path(work_dir_arg) if work_dir_arg else None))
+
     # 解析 workers（分隔符 | 避免与 Windows 盘符 C: 及模型 ID 中的 / 冲突）
     # 格式：PROMPT_PATH|MODEL|LABEL
     parsed = []
@@ -2098,18 +2267,36 @@ def cmd_dispatch(args) -> int:
             print(f"❌ worker 格式错误: `{w}`（应为 PROMPT_PATH|MODEL|LABEL，| 分隔）", file=sys.stderr)
             return 1
         prompt_file, model, label = parts
+        output_name = output_pattern.format(date=date_str, label=label, model=model.replace("/", "-"))
+        output_path = output_dir / output_name
         try:
-            _validate_model_allowed(model)
+            cfg = _validate_execution_config(
+                backend=backend_arg,
+                model=model,
+                work_dir=exec_dir_preview,
+                sandbox=sandbox_arg,
+                reasoning_effort=reasoning_arg,
+                artifact_mode=artifact_mode_arg,
+                expected_output=output_path,
+            )
         except ValueError as e:
             print(f"❌ {e}", file=sys.stderr)
             return 1
         if not Path(prompt_file).is_file():
             print(f"❌ prompt 文件不存在: {prompt_file}", file=sys.stderr)
             return 1
-        output_name = output_pattern.format(date=date_str, label=label, model=model.replace("/", "-"))
         prompt_size = _resolve_prompt_size(prompt_file)
-        parsed.append({"prompt_file": prompt_file, "model": model, "label": label,
-                       "output": output_dir / output_name, "prompt_size_bytes": prompt_size})
+        parsed.append({
+            "prompt_file": prompt_file,
+            "model": model,
+            "label": label,
+            "output": output_path,
+            "prompt_size_bytes": prompt_size,
+            "backend": cfg.backend,
+            "sandbox": cfg.sandbox,
+            "reasoning_effort": cfg.reasoning_effort,
+            "artifact_mode": cfg.artifact_mode,
+        })
     # 检查 output 路径冲突
     outputs = [p["output"] for p in parsed]
     if len(outputs) != len(set(str(o) for o in outputs)):
@@ -2128,10 +2315,29 @@ def cmd_dispatch(args) -> int:
         if resume_error or resume_ctx is None:
             print(f"❌ {resume_error}", file=sys.stderr)
             return 1
+        orig_backend = resume_ctx.get("backend", _backends.BACKEND_OPENCODE)
+        if parsed[0]["backend"] != orig_backend:
+            print(f"❌ 续接必须沿用原派发后端：原 {orig_backend}，"
+                  f"本次 {parsed[0]['backend']}；换后端请新开", file=sys.stderr)
+            return 1
         if parsed[0]["model"] != resume_ctx["model"]:
             print(f"❌ 续接必须沿用原派发模型：原 {resume_ctx['model']}，"
                   f"本次 {parsed[0]['model']}；换模型请新开", file=sys.stderr)
             return 1
+        if orig_backend == _backends.BACKEND_CODEX:
+            if not resume_ctx.get("has_dispatch_meta"):
+                print("❌ Codex 续接缺少 dispatch-meta.json，无法核对原安全策略，拒绝续接", file=sys.stderr)
+                return 1
+            orig_sandbox = resume_ctx.get("sandbox")
+            if parsed[0]["sandbox"] != orig_sandbox:
+                print(f"❌ Codex 续接禁止变更 sandbox 策略：原 {orig_sandbox}，"
+                      f"本次 {parsed[0]['sandbox']}；请新开 worker", file=sys.stderr)
+                return 1
+            orig_am = resume_ctx.get("artifact_mode")
+            if parsed[0]["artifact_mode"] != orig_am:
+                print(f"❌ Codex 续接禁止变更 artifact-mode：原 {orig_am}，"
+                      f"本次 {parsed[0]['artifact_mode']}；请新开 worker", file=sys.stderr)
+                return 1
         original_cwd = resume_ctx.get("cwd", "")
         if original_cwd:
             original_cwd_path = Path(original_cwd)
@@ -3493,7 +3699,11 @@ def cmd_run(args) -> int:
 
     if args.validate:
         try:
-            summary = run_spec.validate_file(spec_path, allowed_models=ALLOWED_MODELS)
+            summary = run_spec.validate_file(
+                spec_path,
+                allowed_models=ALLOWED_MODELS,
+                codex_allowed_models=CODEX_ALLOWED_MODELS,
+            )
         except run_spec.SpecError as e:
             print(f"❌ spec 校验失败 — {e}", file=sys.stderr)
             return 1
@@ -3519,13 +3729,17 @@ def cmd_run(args) -> int:
             "model": str(render(step["model"], ctx)),
             "label": sid,
             "output": out_path,
+            "backend": str(render(step["backend"], ctx)) if step.get("backend") is not None else None,
+            "sandbox": str(render(step["sandbox"], ctx)) if step.get("sandbox") is not None else None,
+            "reasoning_effort": str(render(step["reasoning_effort"], ctx)) if step.get("reasoning_effort") is not None else None,
+            "artifact_mode": str(render(step["artifact_mode"], ctx)) if step.get("artifact_mode") is not None else None,
         }
         # 注意：step 的 `scope` 是 **runner 的分组计数键**（D3），
         # 与 ocsr 遥测的 `--meta scope` 是两回事，此处刻意不混用。
         return _dispatch_batch(
             [worker],
             output_dir=out_path.parent,
-            work_dir=None,
+            work_dir=Path(str(render(step["work_dir"], ctx))) if step.get("work_dir") else None,
             stagger=int(step.get("stagger", DEFAULT_STAGGER)),
             timeout_min=int(step.get("timeout_min", DEFAULT_TIMEOUT)),
             timeout_policy=str(step.get("timeout_policy", TIMEOUT_POLICY_AUTO)),
@@ -3552,7 +3766,8 @@ def cmd_run(args) -> int:
     try:
         return run_spec.execute_file(spec_path, resume=args.resume, answers=answers,
                                      dispatch_fn=_dispatch_step,
-                                     allowed_models=ALLOWED_MODELS)
+                                     allowed_models=ALLOWED_MODELS,
+                                     codex_allowed_models=CODEX_ALLOWED_MODELS)
     except run_spec.SpecError as e:
         print(f"❌ spec 校验失败 — {e}", file=sys.stderr)
         return run_spec.EXIT_SPEC_INVALID
@@ -3590,22 +3805,34 @@ def _classify_preflight_status(exit_code: int, diagnostic_text: str) -> str:
 
 
 def cmd_preflight(args) -> int:
-    """批量探测模型通道可用性。用与真实派发相同的机制（opencode run -m <model>）。"""
+    """批量探测模型通道可用性（支持 opencode 与 codex 后端）。"""
     _check_model_calls_disabled()
     import uuid
+    backend_arg = getattr(args, "backend", None) or _backends.BACKEND_OPENCODE
+    reasoning_arg = getattr(args, "reasoning_effort", None)
     models = args.model
+    timeout_sec = args.timeout
+    work_base = Path(args.work_dir or os.environ.get("TEMP", "/tmp")) / f"ocsr_preflight_{uuid.uuid4().hex[:6]}"
+    configs: list[_backends.ExecutionConfig] = []
     for model in models:
         try:
-            _validate_model_allowed(model)
+            cfg = _validate_execution_config(
+                backend=backend_arg,
+                model=model,
+                work_dir=str(work_base),
+                sandbox=_backends.SANDBOX_READ_ONLY if backend_arg == _backends.BACKEND_CODEX else None,
+                reasoning_effort=reasoning_arg,
+                artifact_mode=_backends.ARTIFACT_MODE_CAPTURE_REPLY if backend_arg == _backends.BACKEND_CODEX else None,
+            )
         except ValueError as e:
             print(f"❌ {e}", file=sys.stderr)
             return 1
-    timeout_sec = args.timeout
-    work_base = Path(args.work_dir or os.environ.get("TEMP", "/tmp")) / f"ocsr_preflight_{uuid.uuid4().hex[:6]}"
+        configs.append(cfg)
     work_base.mkdir(parents=True, exist_ok=True)
+    adapter = _backends.get_backend_adapter(backend_arg)
 
     results: dict[str, str] = {}
-    for model in models:
+    for model, cfg in zip(models, configs):
         wd = work_base / model.replace("/", "-")
         wd.mkdir(parents=True, exist_ok=True)
         sentinel = wd / "probe-ok.marker"
@@ -3615,8 +3842,14 @@ def cmd_preflight(args) -> int:
             f"Do not use any tools. Do not write any files."
         )
         _write_utf8(wd / "prompt.txt", probe_prompt)
-        model_arg = f'-m {model} --title "ocsr-preflight"'
-        launcher = _pwsh_code(model_arg)
+        _backends.write_dispatch_meta(wd, cfg)
+        if backend_arg == _backends.BACKEND_OPENCODE:
+            model_arg = f'-m {model} --title "ocsr-preflight"'
+            launcher = _pwsh_code(model_arg, backend=backend_arg)
+        else:
+            cwd_lit = _native_path_str(wd).replace("'", "''")
+            cmd_frag = adapter.build_preflight_fragment(cfg, cwd_literal=cwd_lit)
+            launcher = _pwsh_code(cmd_frag, cwd=str(wd), backend=backend_arg, command_line=cmd_frag)
         _write_utf8(wd / "launcher.ps1", launcher)
         try:
             _launch_worker(wd)
@@ -3733,6 +3966,14 @@ def main():
                         help="禁止 worker 读取的路径（目录或文件，可多次指定）。"
                              "向 prompt 副本注入禁止块（不改原文件），"
                              "产物落盘后做读路径审计（报告机制，不影响退出码）")
+    p_disp.add_argument("--backend", default=_backends.BACKEND_OPENCODE,
+                        help="执行后端：opencode（默认）或 codex")
+    p_disp.add_argument("--sandbox", default=None,
+                        help="Codex 进程级沙盒策略（read-only / workspace-write）；仅 codex 后端可用")
+    p_disp.add_argument("--reasoning-effort", default=None,
+                        help="Codex 思考强度（须在 allowed-codex-models.json 对应模型白名单内）；仅 codex 后端可用")
+    p_disp.add_argument("--artifact-mode", default=None,
+                        help="产物交付模式：worker-write 或 capture-reply（codex read-only 默认 capture-reply）")
 
     # selftest
     p_test = sub.add_parser("selftest", help="冒烟测试")
@@ -3795,6 +4036,10 @@ def main():
     p_pre.add_argument("--model", action="append", required=True,
                        metavar="MODEL_ID",
                        help="模型 ID（可多次指定）")
+    p_pre.add_argument("--backend", default=_backends.BACKEND_OPENCODE,
+                       help="执行后端：opencode（默认）或 codex")
+    p_pre.add_argument("--reasoning-effort", default=None,
+                       help="Codex 思考强度（仅 codex 后端可用）")
     p_pre.add_argument("--timeout", type=int, default=30,
                        help="单个模型探测超时秒数 (默认 30)")
     p_pre.add_argument("--work-dir", help="临时工作目录 (默认 $TEMP)")
