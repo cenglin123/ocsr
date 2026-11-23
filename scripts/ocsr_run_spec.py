@@ -270,16 +270,63 @@ def _validate_hooks(step: dict, sid: str, kind: str) -> None:
 
 
 def _validate_step_body(step: dict, sid: str, spec_dir: Path,
-                        allowed_models: frozenset[str] | set[str] | None) -> None:
+                        allowed_models: frozenset[str] | set[str] | None,
+                        codex_allowed_models: dict | None = None) -> None:
     stype = step["type"]
     loc = f"steps.{sid}"
     if stype == STEP_DISPATCH:
         for field in ("model", "prompt", "output"):
             _require(isinstance(step.get(field), str) and bool(step[field]),
                      "dispatch-field", f"dispatch 步骤缺少必填字段 `{field}`", loc)
-        if allowed_models is not None and "{{" not in step["model"]:
-            _require(step["model"] in allowed_models, "dispatch-model",
-                     f"模型 `{step['model']}` 不在 OCSR 白名单内", f"{loc}.model")
+        raw_backend = step.get("backend")
+        if raw_backend is None:
+            backend = "opencode"
+        else:
+            _require(isinstance(raw_backend, str) and bool(raw_backend.strip()),
+                     "dispatch-backend", "backend 必须是非空字符串", f"{loc}.backend")
+            backend = raw_backend.strip()
+            if "{{" not in backend:
+                _require(backend in ("opencode", "codex"), "dispatch-backend",
+                         f"不支持的 backend `{backend}`（仅允许 opencode / codex）", f"{loc}.backend")
+        raw_sandbox = step.get("sandbox")
+        raw_effort = step.get("reasoning_effort")
+        raw_artifact_mode = step.get("artifact_mode")
+        for fname, fval in (("sandbox", raw_sandbox), ("reasoning_effort", raw_effort),
+                            ("artifact_mode", raw_artifact_mode)):
+            if fval is not None:
+                _require(isinstance(fval, str) and bool(fval.strip()),
+                         f"dispatch-{fname}", f"{fname} 必须是非空字符串", f"{loc}.{fname}")
+        if backend == "opencode":
+            _require(raw_sandbox is None, "dispatch-sandbox",
+                     "opencode 后端不支持 sandbox 字段", f"{loc}.sandbox")
+            _require(raw_effort is None, "dispatch-reasoning-effort",
+                     "opencode 后端不支持 reasoning_effort 字段", f"{loc}.reasoning_effort")
+            if raw_artifact_mode is not None and "{{" not in raw_artifact_mode:
+                _require(raw_artifact_mode == "worker-write", "dispatch-artifact-mode",
+                         "opencode 后端仅支持 artifact_mode=worker-write", f"{loc}.artifact_mode")
+            if allowed_models is not None and "{{" not in step["model"]:
+                _require(step["model"] in allowed_models, "dispatch-model",
+                         f"模型 `{step['model']}` 不在 OCSR 白名单内", f"{loc}.model")
+        elif backend == "codex":
+            if raw_sandbox is not None and "{{" not in raw_sandbox:
+                _require(raw_sandbox in ("read-only", "workspace-write"), "dispatch-sandbox",
+                         f"codex sandbox 仅允许 read-only / workspace-write，实得 `{raw_sandbox}`",
+                         f"{loc}.sandbox")
+            if raw_artifact_mode is not None and "{{" not in raw_artifact_mode:
+                _require(raw_artifact_mode in ("worker-write", "capture-reply"), "dispatch-artifact-mode",
+                         f"artifact_mode 仅允许 worker-write / capture-reply，实得 `{raw_artifact_mode}`",
+                         f"{loc}.artifact_mode")
+                if raw_sandbox == "read-only":
+                    _require(raw_artifact_mode == "capture-reply", "dispatch-artifact-mode",
+                             "codex read-only 必须使用 artifact_mode=capture-reply", f"{loc}.artifact_mode")
+            if codex_allowed_models is not None and "{{" not in step["model"]:
+                _require(step["model"] in codex_allowed_models, "dispatch-model",
+                         f"Codex 模型 `{step['model']}` 不在 OCSR Codex 白名单内", f"{loc}.model")
+                if raw_effort is not None and "{{" not in raw_effort:
+                    efforts = codex_allowed_models[step["model"]].get("reasoning_efforts", ())
+                    _require(raw_effort in efforts, "dispatch-reasoning-effort",
+                             f"Codex 模型 `{step['model']}` 不支持 reasoning_effort=`{raw_effort}`",
+                             f"{loc}.reasoning_effort")
         prompt = step["prompt"]
         if "{{" not in prompt:
             p = Path(prompt)
@@ -396,7 +443,8 @@ def _detect_cycle(adj: dict[str, list[str]], entry: str) -> list[str] | None:
 
 
 def validate_spec(spec: dict, *, spec_path: Path,
-                  allowed_models: frozenset[str] | set[str] | None = None) -> dict:
+                  allowed_models: frozenset[str] | set[str] | None = None,
+                  codex_allowed_models: dict | None = None) -> dict:
     """离线校验 spec。合法则返回结构化摘要；违反契约抛 SpecError（fail-closed）。
 
     不发起任何模型调用、不启动任何进程、不写任何文件。
@@ -438,7 +486,8 @@ def validate_spec(spec: dict, *, spec_path: Path,
         steps_by_id[sid] = step
 
     for sid, step in steps_by_id.items():
-        _validate_step_body(step, sid, spec_dir, allowed_models)
+        _validate_step_body(step, sid, spec_dir, allowed_models,
+                            codex_allowed_models=codex_allowed_models)
         _validate_hooks(step, sid, "pre")
         _validate_hooks(step, sid, "post")
         _validate_extract(step, sid, warnings)
@@ -554,8 +603,11 @@ def format_summary(summary: dict) -> str:
 
 
 def validate_file(spec_path: Path, *,
-                  allowed_models: frozenset[str] | set[str] | None = None) -> dict:
-    return validate_spec(load_spec(spec_path), spec_path=spec_path, allowed_models=allowed_models)
+                  allowed_models: frozenset[str] | set[str] | None = None,
+                  codex_allowed_models: dict | None = None) -> dict:
+    return validate_spec(load_spec(spec_path), spec_path=spec_path,
+                         allowed_models=allowed_models,
+                         codex_allowed_models=codex_allowed_models)
 
 
 def summary_json(summary: dict) -> str:
@@ -945,13 +997,15 @@ def _execute_dispatch(step: dict, sid: str, ctx: dict, workdir: Path,
 
 def execute(spec: dict, spec_path: Path, *, resume: bool = False,
             answers: dict[str, str] | None = None,
-            dispatch_fn=None, allowed_models=None) -> int:
+            dispatch_fn=None, allowed_models=None,
+            codex_allowed_models=None) -> int:
     """执行 spec。runner **独占** workdir（D7）。
 
     dispatch_fn 由调用方注入（依赖倒置：本模块不 import ocsr_dispatch，
     避免循环依赖，同时让引擎可脱离派发能力独立测试）。
     """
-    validate_spec(spec, spec_path=spec_path, allowed_models=allowed_models)
+    validate_spec(spec, spec_path=spec_path, allowed_models=allowed_models,
+                  codex_allowed_models=codex_allowed_models)
     answers = answers or {}
     steps_by_id = {s["id"]: s for s in spec["steps"]}
 
