@@ -279,9 +279,19 @@ ALLOWED_MODELS = frozenset(_CONFIGURED_MODELS)
 DEFAULT_MODEL = _CONFIGURED_MODELS[0] if _CONFIGURED_MODELS else None
 
 CODEX_ALLOWED_MODELS_PATH = _backends.default_codex_allowed_models_path(OCSR_HOME)
-CODEX_ALLOWED_MODELS = _backends.load_codex_allowed_models(CODEX_ALLOWED_MODELS_PATH)
-DEFAULT_CODEX_MODEL = next(iter(CODEX_ALLOWED_MODELS), None)
+# 延迟加载：Codex 白名单损坏不得阻断默认 OpenCode 入口（测试可直接 monkeypatch 为 dict）。
+CODEX_ALLOWED_MODELS: dict | None = None
 DISPATCH_META_FILE = _backends.DISPATCH_META_FILE
+
+
+def _get_codex_allowed_models() -> dict:
+    """按需加载 Codex 白名单；若配置文件损坏，仅在 Codex 路径抛出 BackendConfigError。"""
+    if CODEX_ALLOWED_MODELS is not None:
+        return CODEX_ALLOWED_MODELS
+    try:
+        return _backends.load_codex_allowed_models(CODEX_ALLOWED_MODELS_PATH)
+    except RuntimeError as exc:
+        raise _backends.BackendConfigError(str(exc)) from exc
 
 
 def _validate_execution_config(
@@ -294,9 +304,23 @@ def _validate_execution_config(
     artifact_mode: str | None = None,
     expected_output: Path | None = None,
 ) -> _backends.ExecutionConfig:
-    """统一入口校验：opencode 经 _validate_model_allowed（兼容旧测试 monkeypatch），codex 读 CODEX_ALLOWED_MODELS。"""
+    """统一入口校验：opencode 经 _validate_model_allowed（兼容旧测试 monkeypatch），codex 按需加载白名单。"""
     resolved_backend = (backend or _backends.BACKEND_OPENCODE).strip()
     if resolved_backend == _backends.BACKEND_OPENCODE:
+        # 先检查是否携带 Codex 专属参数（触发 BackendConfigError → 退出码 2）
+        if sandbox is not None or reasoning_effort is not None or (
+            artifact_mode is not None and artifact_mode != _backends.ARTIFACT_MODE_WORKER_WRITE
+        ):
+            _backends.validate_execution_config(
+                backend=resolved_backend,
+                model=model,
+                work_dir=work_dir,
+                sandbox=sandbox,
+                reasoning_effort=reasoning_effort,
+                artifact_mode=artifact_mode,
+                expected_output=expected_output,
+                opencode_allowed_models=ALLOWED_MODELS | {model},
+            )
         _validate_model_allowed(model)
         return _backends.validate_execution_config(
             backend=resolved_backend,
@@ -307,10 +331,9 @@ def _validate_execution_config(
             artifact_mode=artifact_mode,
             expected_output=expected_output,
             opencode_allowed_models=ALLOWED_MODELS | {model},
-            codex_allowed_models=CODEX_ALLOWED_MODELS,
             opencode_unconfigured_msg=UNCONFIGURED_GUIDANCE,
-            codex_allowlist_path=CODEX_ALLOWED_MODELS_PATH,
         )
+    codex_pool = _get_codex_allowed_models() if resolved_backend == _backends.BACKEND_CODEX else None
     return _backends.validate_execution_config(
         backend=resolved_backend,
         model=model,
@@ -320,7 +343,7 @@ def _validate_execution_config(
         artifact_mode=artifact_mode,
         expected_output=expected_output,
         opencode_allowed_models=ALLOWED_MODELS,
-        codex_allowed_models=CODEX_ALLOWED_MODELS,
+        codex_allowed_models=codex_pool,
         opencode_unconfigured_msg=UNCONFIGURED_GUIDANCE,
         codex_allowlist_path=CODEX_ALLOWED_MODELS_PATH,
     )
@@ -464,21 +487,36 @@ def _pwsh_code(
         else f"& opencode run $prompt --format json --standalone {text} '{cwd_literal}'"
     )
     sid_field = adapter.session_id_field
+    pre_capture_clean = ""
     capture_block = ""
     if capture_output_path:
+        pre_capture_clean = '          Remove-Item -LiteralPath "$PSScriptRoot/last-message.tmp" -Force -ErrorAction SilentlyContinue\n'
         cap_literal = _native_path_str(capture_output_path).replace("'", "''")
         capture_block = textwrap.dedent(f"""\
-          if ($opencodeExit -eq 0 -and (Test-Path -LiteralPath "$PSScriptRoot/last-message.tmp" -PathType Leaf)) {{
-            $capturedText = Get-Content -LiteralPath "$PSScriptRoot/last-message.tmp" -Raw -Encoding UTF8
-            if (-not [string]::IsNullOrWhiteSpace($capturedText)) {{
-              $targetPath = '{cap_literal}'
-              $targetDir = Split-Path -Parent $targetPath
-              if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {{
-                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+          if ($opencodeExit -eq 0) {{
+            $captureOk = $false
+            if (Test-Path -LiteralPath "$PSScriptRoot/last-message.tmp" -PathType Leaf) {{
+              $capturedText = Get-Content -LiteralPath "$PSScriptRoot/last-message.tmp" -Raw -Encoding UTF8
+              if (-not [string]::IsNullOrWhiteSpace($capturedText)) {{
+                $targetPath = '{cap_literal}'
+                $targetDir = Split-Path -Parent $targetPath
+                $atomicTmp = "$targetPath.ocsr.tmp.$PID"
+                try {{
+                  if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {{
+                    New-Item -ItemType Directory -Path $targetDir -Force -ErrorAction Stop | Out-Null
+                  }}
+                  [System.IO.File]::WriteAllText($atomicTmp, $capturedText, [Text.UTF8Encoding]::new($false))
+                  Move-Item -LiteralPath $atomicTmp -Destination $targetPath -Force -ErrorAction Stop
+                  $captureOk = $true
+                }} catch {{
+                  Remove-Item -LiteralPath $atomicTmp -Force -ErrorAction SilentlyContinue
+                  "capture-reply commit failed: $_" | Add-Content "$PSScriptRoot/error.log" -Encoding UTF8
+                }}
               }}
-              $atomicTmp = "$targetPath.ocsr.tmp.$PID"
-              [System.IO.File]::WriteAllText($atomicTmp, $capturedText, [Text.UTF8Encoding]::new($false))
-              Move-Item -LiteralPath $atomicTmp -Destination $targetPath -Force
+            }}
+            if (-not $captureOk) {{
+              "capture-reply failed: missing or empty last-message.tmp" | Add-Content "$PSScriptRoot/error.log" -Encoding UTF8
+              $opencodeExit = 2
             }}
           }}
         """)
@@ -507,7 +545,7 @@ def _pwsh_code(
           Set-Location -LiteralPath '{cwd_literal}'
           $env:PWD = '{cwd_literal}'
           $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
-          $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
+{pre_capture_clean}          $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
           {exec_line} 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
             $line = [string]$_
             $line | Add-Content "$PSScriptRoot/run.log" -Encoding UTF8
@@ -1999,6 +2037,9 @@ def _dispatch_batch(
                 artifact_mode=w.get("artifact_mode"),
                 expected_output=Path(w["output"]),
             )
+        except _backends.BackendConfigError as e:
+            print(f"❌ {e}", file=sys.stderr)
+            return EXIT_DETERMINISTIC_FAILURE
         except ValueError as e:
             print(f"❌ {e}", file=sys.stderr)
             return 1
@@ -2258,6 +2299,24 @@ def cmd_dispatch(args) -> int:
     work_dir_arg = getattr(args, "work_dir", None)
     exec_dir_preview = str(_resolve_execution_dir(Path(work_dir_arg) if work_dir_arg else None))
 
+    # F3 修复：若传入 --resume-from，先解析恢复上下文拿到最终绑定执行目录，再校验输出边界。
+    resume_from_arg = getattr(args, "resume_from", None)
+    resume_ctx: dict | None = None
+    if resume_from_arg:
+        if len(workers) != 1:
+            print("❌ --resume-from 只允许单个 --worker（续接是同一任务的新一次尝试）",
+                  file=sys.stderr)
+            return 1
+        resume_ctx, resume_error = _read_resume_context(Path(resume_from_arg))
+        if resume_error or resume_ctx is None:
+            print(f"❌ {resume_error}", file=sys.stderr)
+            return 1
+    effective_exec_dir = (
+        resume_ctx["cwd"]
+        if resume_ctx is not None and resume_ctx.get("cwd")
+        else exec_dir_preview
+    )
+
     # 解析 workers（分隔符 | 避免与 Windows 盘符 C: 及模型 ID 中的 / 冲突）
     # 格式：PROMPT_PATH|MODEL|LABEL
     parsed = []
@@ -2273,12 +2332,15 @@ def cmd_dispatch(args) -> int:
             cfg = _validate_execution_config(
                 backend=backend_arg,
                 model=model,
-                work_dir=exec_dir_preview,
+                work_dir=effective_exec_dir,
                 sandbox=sandbox_arg,
                 reasoning_effort=reasoning_arg,
                 artifact_mode=artifact_mode_arg,
                 expected_output=output_path,
             )
+        except _backends.BackendConfigError as e:
+            print(f"❌ {e}", file=sys.stderr)
+            return EXIT_DETERMINISTIC_FAILURE
         except ValueError as e:
             print(f"❌ {e}", file=sys.stderr)
             return 1
@@ -2303,23 +2365,13 @@ def cmd_dispatch(args) -> int:
         print("❌ output 路径冲突（output-pattern 产生了重复文件名）", file=sys.stderr)
         return 1
 
-    # 返工续接：只允许单 worker；模型必须与原派发一致；旧进程必须已退出。
-    resume_from_arg = getattr(args, "resume_from", None)
-    resume_ctx: dict | None = None
-    if resume_from_arg:
-        if len(workers) != 1:
-            print("❌ --resume-from 只允许单个 --worker（续接是同一任务的新一次尝试）",
-                  file=sys.stderr)
-            return 1
-        resume_ctx, resume_error = _read_resume_context(Path(resume_from_arg))
-        if resume_error or resume_ctx is None:
-            print(f"❌ {resume_error}", file=sys.stderr)
-            return 1
+    # 返工续接：只允许单 worker；后端/模型/策略必须与原派发一致；旧进程必须已退出。
+    if resume_from_arg and resume_ctx is not None:
         orig_backend = resume_ctx.get("backend", _backends.BACKEND_OPENCODE)
         if parsed[0]["backend"] != orig_backend:
             print(f"❌ 续接必须沿用原派发后端：原 {orig_backend}，"
                   f"本次 {parsed[0]['backend']}；换后端请新开", file=sys.stderr)
-            return 1
+            return EXIT_DETERMINISTIC_FAILURE
         if parsed[0]["model"] != resume_ctx["model"]:
             print(f"❌ 续接必须沿用原派发模型：原 {resume_ctx['model']}，"
                   f"本次 {parsed[0]['model']}；换模型请新开", file=sys.stderr)
@@ -2327,17 +2379,22 @@ def cmd_dispatch(args) -> int:
         if orig_backend == _backends.BACKEND_CODEX:
             if not resume_ctx.get("has_dispatch_meta"):
                 print("❌ Codex 续接缺少 dispatch-meta.json，无法核对原安全策略，拒绝续接", file=sys.stderr)
-                return 1
+                return EXIT_DETERMINISTIC_FAILURE
             orig_sandbox = resume_ctx.get("sandbox")
             if parsed[0]["sandbox"] != orig_sandbox:
                 print(f"❌ Codex 续接禁止变更 sandbox 策略：原 {orig_sandbox}，"
                       f"本次 {parsed[0]['sandbox']}；请新开 worker", file=sys.stderr)
-                return 1
+                return EXIT_DETERMINISTIC_FAILURE
             orig_am = resume_ctx.get("artifact_mode")
             if parsed[0]["artifact_mode"] != orig_am:
                 print(f"❌ Codex 续接禁止变更 artifact-mode：原 {orig_am}，"
                       f"本次 {parsed[0]['artifact_mode']}；请新开 worker", file=sys.stderr)
-                return 1
+                return EXIT_DETERMINISTIC_FAILURE
+            orig_effort = resume_ctx.get("reasoning_effort")
+            if parsed[0]["reasoning_effort"] != orig_effort:
+                print(f"❌ Codex 续接禁止变更 reasoning-effort：原 {orig_effort}，"
+                      f"本次 {parsed[0]['reasoning_effort']}；请新开 worker", file=sys.stderr)
+                return EXIT_DETERMINISTIC_FAILURE
         original_cwd = resume_ctx.get("cwd", "")
         if original_cwd:
             original_cwd_path = Path(original_cwd)
@@ -3697,12 +3754,19 @@ def cmd_run(args) -> int:
 
     spec_path = Path(args.spec)
 
+    # 仅在 spec 存在 codex 步骤或配置可读时传 codex 白名单；损坏的 codex 配置不阻断纯 opencode spec。
+    codex_models_for_spec: dict | None = None
+    try:
+        codex_models_for_spec = _get_codex_allowed_models()
+    except _backends.BackendConfigError:
+        codex_models_for_spec = {}
+
     if args.validate:
         try:
             summary = run_spec.validate_file(
                 spec_path,
                 allowed_models=ALLOWED_MODELS,
-                codex_allowed_models=CODEX_ALLOWED_MODELS,
+                codex_allowed_models=codex_models_for_spec,
             )
         except run_spec.SpecError as e:
             print(f"❌ spec 校验失败 — {e}", file=sys.stderr)
@@ -3767,7 +3831,7 @@ def cmd_run(args) -> int:
         return run_spec.execute_file(spec_path, resume=args.resume, answers=answers,
                                      dispatch_fn=_dispatch_step,
                                      allowed_models=ALLOWED_MODELS,
-                                     codex_allowed_models=CODEX_ALLOWED_MODELS)
+                                     codex_allowed_models=codex_models_for_spec)
     except run_spec.SpecError as e:
         print(f"❌ spec 校验失败 — {e}", file=sys.stderr)
         return run_spec.EXIT_SPEC_INVALID
@@ -3824,6 +3888,9 @@ def cmd_preflight(args) -> int:
                 reasoning_effort=reasoning_arg,
                 artifact_mode=_backends.ARTIFACT_MODE_CAPTURE_REPLY if backend_arg == _backends.BACKEND_CODEX else None,
             )
+        except _backends.BackendConfigError as e:
+            print(f"❌ {e}", file=sys.stderr)
+            return EXIT_DETERMINISTIC_FAILURE
         except ValueError as e:
             print(f"❌ {e}", file=sys.stderr)
             return 1
