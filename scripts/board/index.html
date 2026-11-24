@@ -520,7 +520,15 @@ document.addEventListener("click",async e=>{
     render();return;
   }
   if(btn.dataset.act==="sid")copyText(w.session_id);
-  if(btn.dataset.act==="resume")copyText(`python scripts/ocsr_dispatch.py dispatch --worker "<prompt文件>|${w.model}|${w.label}-rework" --output-dir "<输出目录>" --resume-from "${w.dir}"`,"已复制返工模板（补全 prompt 与输出目录后执行）");
+  if(btn.dataset.act==="resume"){
+    const extra=[];
+    if(w.backend&&w.backend!=="opencode")extra.push(`--backend ${w.backend}`);
+    if(w.sandbox)extra.push(`--sandbox ${w.sandbox}`);
+    if(w.artifact_mode&&w.backend==="codex")extra.push(`--artifact-mode ${w.artifact_mode}`);
+    if(w.reasoning_effort)extra.push(`--reasoning-effort ${w.reasoning_effort}`);
+    const extraStr=extra.length?` ${extra.join(" ")}`:"";
+    copyText(`python scripts/ocsr_dispatch.py dispatch${extraStr} --worker "<prompt文件>|${w.model}|${w.label}-rework" --output-dir "<输出目录>" --resume-from "${w.dir}"`,"已复制返工模板（补全 prompt 与输出目录后执行）");
+  }
   if(btn.dataset.act==="hide"){
     if(isArchived(w)){unarchiveOne(w);}else{hidden.add(w.key);}
     saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);

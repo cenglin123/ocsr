@@ -296,6 +296,18 @@ def _validate_step_body(step: dict, sid: str, spec_dir: Path,
             if fval is not None:
                 _require(isinstance(fval, str) and bool(fval.strip()),
                          f"dispatch-{fname}", f"{fname} 必须是非空字符串", f"{loc}.{fname}")
+        # 即使 backend 为模板，也独立校验字面量 sandbox / artifact_mode 的值域
+        if raw_sandbox is not None and "{{" not in raw_sandbox:
+            _require(raw_sandbox in ("read-only", "workspace-write"), "dispatch-sandbox",
+                     f"sandbox 仅允许 read-only / workspace-write，实得 `{raw_sandbox}`",
+                     f"{loc}.sandbox")
+        if raw_artifact_mode is not None and "{{" not in raw_artifact_mode:
+            _require(raw_artifact_mode in ("worker-write", "capture-reply"), "dispatch-artifact-mode",
+                     f"artifact_mode 仅允许 worker-write / capture-reply，实得 `{raw_artifact_mode}`",
+                     f"{loc}.artifact_mode")
+            if raw_sandbox == "read-only":
+                _require(raw_artifact_mode == "capture-reply", "dispatch-artifact-mode",
+                         "read-only 必须使用 artifact_mode=capture-reply", f"{loc}.artifact_mode")
         if backend == "opencode":
             _require(raw_sandbox is None, "dispatch-sandbox",
                      "opencode 后端不支持 sandbox 字段", f"{loc}.sandbox")

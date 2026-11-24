@@ -205,6 +205,9 @@ def _scan_worker_dir_fresh(wd: Path, dispatch_name: str, started: datetime | Non
     dispatch_meta = _load_json(wd / "dispatch-meta.json")
     meta_model = dispatch_meta.get("cli_model") if isinstance(dispatch_meta, dict) else None
     meta_backend = dispatch_meta.get("backend") if isinstance(dispatch_meta, dict) else None
+    meta_sandbox = dispatch_meta.get("sandbox_requested") if isinstance(dispatch_meta, dict) else None
+    meta_artifact_mode = dispatch_meta.get("artifact_mode") if isinstance(dispatch_meta, dict) else None
+    meta_effort = dispatch_meta.get("reasoning_effort_requested") if isinstance(dispatch_meta, dict) else None
     resolved_model = meta_model.strip() if isinstance(meta_model, str) and meta_model.strip() else _extract_model(wd / "launcher.ps1")
     resolved_backend = meta_backend.strip() if isinstance(meta_backend, str) and meta_backend.strip() else (binding.get("backend") or "opencode")
     return {
@@ -212,6 +215,9 @@ def _scan_worker_dir_fresh(wd: Path, dispatch_name: str, started: datetime | Non
         "label": label,
         "dir": str(wd),
         "backend": resolved_backend,
+        "sandbox": meta_sandbox if isinstance(meta_sandbox, str) else "",
+        "artifact_mode": meta_artifact_mode if isinstance(meta_artifact_mode, str) else "",
+        "reasoning_effort": meta_effort if isinstance(meta_effort, str) else "",
         "state": raw_state,
         "badge": badge,
         "badge_text": badge_text,

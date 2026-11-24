@@ -42,6 +42,11 @@ DISPATCH_META_FILE = "dispatch-meta.json"
 DISPATCH_META_SCHEMA_VERSION = 1
 
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+_SAFE_EFFORT_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+class BackendConfigError(ValueError):
+    """新增多后端配置/参数/白名单确定性拒绝错误（CLI 应返回退出码 2）。"""
 
 
 def default_codex_allowed_models_path(ocsr_home: Path) -> Path:
@@ -64,7 +69,7 @@ def load_codex_allowed_models(path: Path) -> dict[str, dict[str, Any]]:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"Cannot load OCSR Codex allowlist from {path}: {exc}") from exc
     if not text.strip():
         return {}
@@ -101,7 +106,13 @@ def load_codex_allowed_models(path: Path) -> dict[str, dict[str, Any]]:
         efforts_raw = item.get("reasoning_efforts", [])
         if (
             not isinstance(efforts_raw, list)
-            or any(not isinstance(e, str) or not e.strip() or e != e.strip() for e in efforts_raw)
+            or any(
+                not isinstance(e, str)
+                or not e.strip()
+                or e != e.strip()
+                or not _SAFE_EFFORT_RE.fullmatch(e)
+                for e in efforts_raw
+            )
             or len(efforts_raw) != len(set(efforts_raw))
         ):
             raise RuntimeError(
@@ -177,7 +188,7 @@ def validate_execution_config(
     """统一校验执行配置；任何未知后端、未配置白名单或非法组合均 fail-closed 抛 ValueError。"""
     resolved_backend = (backend or BACKEND_OPENCODE).strip()
     if resolved_backend not in SUPPORTED_BACKENDS:
-        raise ValueError(
+        raise BackendConfigError(
             f"Unsupported backend '{resolved_backend}'. "
             f"Supported backends: {', '.join(sorted(SUPPORTED_BACKENDS))}."
         )
@@ -186,17 +197,17 @@ def validate_execution_config(
 
     if resolved_backend == BACKEND_OPENCODE:
         if sandbox is not None:
-            raise ValueError(
+            raise BackendConfigError(
                 f"--sandbox '{sandbox}' is only supported by the 'codex' backend; "
                 f"'opencode' does not provide a process-level sandbox."
             )
         if reasoning_effort is not None:
-            raise ValueError(
+            raise BackendConfigError(
                 f"--reasoning-effort '{reasoning_effort}' is only supported by the 'codex' backend."
             )
         resolved_artifact_mode = artifact_mode or ARTIFACT_MODE_WORKER_WRITE
         if resolved_artifact_mode != ARTIFACT_MODE_WORKER_WRITE:
-            raise ValueError(
+            raise BackendConfigError(
                 f"--artifact-mode '{resolved_artifact_mode}' is not supported by 'opencode' "
                 f"(only '{ARTIFACT_MODE_WORKER_WRITE}' is supported)."
             )
@@ -225,29 +236,29 @@ def validate_execution_config(
         )
 
     # backend == BACKEND_CODEX
-    if "/" in model:
-        raise ValueError(
+    if "/" in model or not _SAFE_TOKEN_RE.fullmatch(model):
+        raise BackendConfigError(
             f"Codex backend requires a bare CLI model slug (without '/'), got '{model}'. "
             f"Do not encode backend or provider as a model prefix."
         )
     codex_pool = codex_allowed_models or {}
     if not codex_pool:
         hint = str(codex_allowlist_path) if codex_allowlist_path else "~/.ocsr/allowed-codex-models.json"
-        raise ValueError(
+        raise BackendConfigError(
             f"OCSR Codex model allowlist is not configured (missing or empty file at {hint}).\n"
             f"Write verified model entries [{{'model','provider','family','reasoning_efforts'}}] to {hint}."
         )
     entry = codex_pool.get(model)
     if entry is None:
         allowed = ", ".join(sorted(codex_pool))
-        raise ValueError(
+        raise BackendConfigError(
             f"Codex model '{model}' is not in the OCSR Codex allowlist.\n"
             f"Allowed Codex models: {allowed}"
         )
 
     resolved_sandbox = sandbox or SANDBOX_WORKSPACE_WRITE
     if resolved_sandbox not in SUPPORTED_CODEX_SANDBOXES:
-        raise ValueError(
+        raise BackendConfigError(
             f"Invalid Codex --sandbox '{resolved_sandbox}'. "
             f"Allowed values: {', '.join(sorted(SUPPORTED_CODEX_SANDBOXES))}."
         )
@@ -260,23 +271,27 @@ def validate_execution_config(
         )
     else:
         if artifact_mode not in SUPPORTED_ARTIFACT_MODES:
-            raise ValueError(
+            raise BackendConfigError(
                 f"Invalid --artifact-mode '{artifact_mode}'. "
                 f"Allowed values: {', '.join(sorted(SUPPORTED_ARTIFACT_MODES))}."
             )
         resolved_artifact_mode = artifact_mode
 
     if resolved_sandbox == SANDBOX_READ_ONLY and resolved_artifact_mode != ARTIFACT_MODE_CAPTURE_REPLY:
-        raise ValueError(
+        raise BackendConfigError(
             "Codex --sandbox read-only cannot write target files directly; "
             "use --artifact-mode capture-reply (default for read-only)."
         )
 
     if reasoning_effort is not None:
+        if not isinstance(reasoning_effort, str) or not _SAFE_EFFORT_RE.fullmatch(reasoning_effort):
+            raise BackendConfigError(
+                f"Invalid reasoning effort '{reasoning_effort}': must match {_SAFE_EFFORT_RE.pattern}."
+            )
         supported_efforts = entry.get("reasoning_efforts", ())
         if reasoning_effort not in supported_efforts:
             allowed_eff = ", ".join(supported_efforts) if supported_efforts else "(none configured)"
-            raise ValueError(
+            raise BackendConfigError(
                 f"Reasoning effort '{reasoning_effort}' is not allowed for Codex model '{model}'. "
                 f"Configured reasoning_efforts: {allowed_eff}."
             )
@@ -288,7 +303,7 @@ def validate_execution_config(
         and work_dir
     ):
         if not _path_is_within(expected_output, Path(work_dir)):
-            raise ValueError(
+            raise BackendConfigError(
                 f"Codex workspace-write with worker-write requires expected output '{expected_output}' "
                 f"to reside inside work_dir '{work_dir}', or use --artifact-mode capture-reply."
             )
@@ -408,6 +423,8 @@ class CodexAdapter(BackendAdapter):
         etype = str(last.get("type") or "")
         if etype == "turn.completed":
             return "completed"
+        if etype in ("turn.failed", "error"):
+            return "error_reported"
         if etype == "item.started":
             item = last.get("item") if isinstance(last.get("item"), dict) else {}
             if item.get("type") == "command_execution":
@@ -415,14 +432,29 @@ class CodexAdapter(BackendAdapter):
             return "active"
         if etype == "item.completed":
             item = last.get("item") if isinstance(last.get("item"), dict) else {}
-            if item.get("type") == "agent_message":
+            itype = item.get("type")
+            if itype == "error":
+                return "error_reported"
+            if itype == "agent_message":
                 return "assistant_message"
-            if item.get("type") == "command_execution":
+            if itype == "command_execution":
+                status = str(item.get("status") or "").lower()
+                exit_code = item.get("exit_code")
+                if status in ("failed", "error") or (isinstance(exit_code, int) and exit_code != 0):
+                    return "tool_error_reported"
                 return "tool_completed"
             return "active"
         if etype in ("thread.started", "turn.started"):
             return "started"
         return "unknown"
+
+    def _effort_fragment(self, effort: str | None) -> str:
+        if not effort:
+            return ""
+        if not _SAFE_EFFORT_RE.fullmatch(effort):
+            raise BackendConfigError(f"Unsafe reasoning_effort value: {effort!r}")
+        raw_cfg = f'model_reasoning_effort="{effort}"'
+        return f" -c '{_ps_single_quote(raw_cfg)}'"
 
     def build_command_fragment(
         self,
@@ -434,11 +466,7 @@ class CodexAdapter(BackendAdapter):
         capture_tmp_expr: str = "",
     ) -> str:
         sandbox = cfg.sandbox or SANDBOX_WORKSPACE_WRITE
-        effort_part = (
-            f" -c 'model_reasoning_effort=\"{cfg.reasoning_effort}\"'"
-            if cfg.reasoning_effort
-            else ""
-        )
+        effort_part = self._effort_fragment(cfg.reasoning_effort)
         out_part = f" --output-last-message {capture_tmp_expr}" if capture_tmp_expr else ""
         if resume_session:
             # Phase 0 实证：前置 --sandbox 真实生效，resume 使用当前工作目录（launcher 已 Set-Location）。
@@ -467,11 +495,7 @@ class CodexAdapter(BackendAdapter):
         return argv
 
     def build_preflight_fragment(self, cfg: ExecutionConfig, *, cwd_literal: str) -> str:
-        effort_part = (
-            f" -c 'model_reasoning_effort=\"{cfg.reasoning_effort}\"'"
-            if cfg.reasoning_effort
-            else ""
-        )
+        effort_part = self._effort_fragment(cfg.reasoning_effort)
         return (
             f"$prompt | & codex exec --cd '{cwd_literal}' --sandbox read-only "
             f"--skip-git-repo-check --color never --json "

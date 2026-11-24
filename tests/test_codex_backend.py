@@ -415,8 +415,10 @@ def test_resume_rejects_backend_or_sandbox_escalation(tmp_path: Path, monkeypatc
     monkeypatch.setattr(dispatch, "CODEX_ALLOWED_MODELS", SAMPLE_CODEX_POOL)
     monkeypatch.setattr(dispatch, "ALLOWED_MODELS", SAMPLE_OPENCODE_POOL)
     monkeypatch.delenv("OCSR_DISABLE_MODEL_CALLS", raising=False)
+    called = []
+    monkeypatch.setattr(dispatch, "_dispatch_batch", lambda *a, **kw: called.append(1) or 0)
 
-    # Attempting to escalate sandbox from read-only -> workspace-write must fail
+    # Attempting to escalate sandbox from read-only -> workspace-write must fail with exit 2
     import argparse
     args = argparse.Namespace(
         worker=[f"{prompt}|gpt-6.1-sol|R1"],
@@ -432,4 +434,201 @@ def test_resume_rejects_backend_or_sandbox_escalation(tmp_path: Path, monkeypatc
         diagnostic_session_db=None,
     )
     rc = dispatch.cmd_dispatch(args)
-    assert rc == 1
+    assert rc == 2
+    assert called == []
+
+
+# ─── 8. Audit F1–F4 & P2 regression suite ────────────────────────────
+
+def test_f1_effort_rejects_powershell_injection(tmp_path: Path):
+    bad_cfg = tmp_path / "bad-effort.json"
+    bad_cfg.write_text(json.dumps([
+        {
+            "model": "gpt-6.1-sol",
+            "provider": "openai",
+            "family": "gpt",
+            "reasoning_efforts": ["low'; Write-Output INJECTED; #"],
+        }
+    ]), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="reasoning_efforts"):
+        backends.load_codex_allowed_models(bad_cfg)
+
+    with pytest.raises(backends.BackendConfigError, match="Invalid reasoning effort"):
+        backends.validate_execution_config(
+            backend="codex",
+            model="gpt-6.1-sol",
+            work_dir=str(tmp_path),
+            sandbox="read-only",
+            reasoning_effort="low'; Write-Output INJECTED; #",
+            codex_allowed_models=SAMPLE_CODEX_POOL,
+        )
+
+
+def test_f2_corrupt_codex_allowlist_does_not_block_opencode(tmp_path: Path, monkeypatch):
+    for bad_bytes in (b"{broken json", b"\xff\xfe\x00\x80invalid-utf8"):
+        corrupt = tmp_path / "corrupt-codex.json"
+        corrupt.write_bytes(bad_bytes)
+        monkeypatch.setattr(dispatch, "CODEX_ALLOWED_MODELS", None)
+        monkeypatch.setattr(dispatch, "CODEX_ALLOWED_MODELS_PATH", corrupt)
+        monkeypatch.setattr(dispatch, "ALLOWED_MODELS", SAMPLE_OPENCODE_POOL)
+
+        # Default opencode validation succeeds even when Codex allowlist is corrupt / invalid UTF-8
+        cfg = dispatch._validate_execution_config(
+            backend="opencode",
+            model="deepseek/deepseek-flash",
+            work_dir=str(tmp_path),
+        )
+        assert cfg.backend == "opencode"
+
+        # Codex validation fails closed with BackendConfigError (exit 2 at CLI)
+        with pytest.raises(backends.BackendConfigError):
+            dispatch._validate_execution_config(
+                backend="codex",
+                model="gpt-6.1-sol",
+                work_dir=str(tmp_path),
+            )
+
+
+def test_f3_resume_from_different_cwd_validates_against_original_workspace(tmp_path: Path, monkeypatch, capsys):
+    ws_a = tmp_path / "ws_a"
+    ws_b = tmp_path / "ws_b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    orig = tmp_path / "orig_wd"
+    orig.mkdir()
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("rework", encoding="utf-8")
+    cfg = backends.ExecutionConfig(
+        backend="codex", cli_model="gpt-6.1-sol", provider="openai",
+        family="gpt", work_dir=str(ws_a), sandbox="workspace-write",
+        reasoning_effort="low", artifact_mode="worker-write",
+    )
+    backends.write_dispatch_meta(orig, cfg)
+    (orig / "session-binding.json").write_text(json.dumps({
+        "session_id": "01a20983-acbf-7331-981e-56dcfdd26ad1",
+        "backend": "codex",
+        "cwd": str(ws_a),
+        "pid": 999999,
+        "creation_time": "100",
+        "command_fingerprint": "fp1",
+    }), encoding="utf-8")
+    (orig / "process-identity.json").write_text(json.dumps({
+        "pid": 999999, "creation_time": "100", "command_fingerprint": "fp1"
+    }), encoding="utf-8")
+    (orig / "worker-state.json").write_text(json.dumps({
+        "state": "landed", "attempt_index": 1, "rework_index": 0
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(dispatch, "CODEX_ALLOWED_MODELS", SAMPLE_CODEX_POOL)
+    monkeypatch.setattr(dispatch, "ALLOWED_MODELS", SAMPLE_OPENCODE_POOL)
+    monkeypatch.delenv("OCSR_DISABLE_MODEL_CALLS", raising=False)
+    monkeypatch.setattr(dispatch, "_query_process_table", lambda: {})
+    monkeypatch.setattr(dispatch, "_resume_process_status", lambda *a, **kw: "stopped")
+    monkeypatch.setattr(dispatch, "_descendant_pids", lambda *a, **kw: set())
+    dispatched = []
+    monkeypatch.setattr(dispatch, "_dispatch_batch", lambda workers, **kw: dispatched.append((workers, kw)) or 0)
+
+    import argparse
+    # Caller runs from ws_b without passing --work-dir ws_a, output is inside ws_a
+    args = argparse.Namespace(
+        worker=[f"{prompt}|gpt-6.1-sol|R1"],
+        output_dir=str(ws_a),
+        output_pattern="{label}.md",
+        stagger=0, timeout=1, timeout_policy="auto", watch=False, progress=False,
+        harness="cli", meta=[], attempt_index=None, rework_index=None,
+        recovery_safe=False, forbid_paths=[], resume_from=str(orig),
+        backend="codex", sandbox="workspace-write", reasoning_effort="low",
+        artifact_mode="worker-write", work_dir=str(ws_b),
+        dispatch_root=str(tmp_path), ledger_dir=None, allow_overwrite=[],
+        total_timeout=None, renewal_minutes=None, max_renewals=1,
+        diagnostic_session_db=None,
+    )
+    rc = dispatch.cmd_dispatch(args)
+    assert rc == 0
+    assert len(dispatched) == 1
+    assert dispatched[0][1]["binding_cwd"] == str(ws_a)
+
+    # Changing reasoning_effort on resume must be rejected with exit 2 and clear message
+    args.reasoning_effort = "high"
+    rc_bad = dispatch.cmd_dispatch(args)
+    err = capsys.readouterr().err
+    assert rc_bad == 2
+    assert "reasoning-effort" in err
+
+
+def test_f4_new_backend_config_errors_return_exit_2(tmp_path: Path, monkeypatch, capsys):
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("hi", encoding="utf-8")
+    monkeypatch.setattr(dispatch, "ALLOWED_MODELS", SAMPLE_OPENCODE_POOL)
+    monkeypatch.setattr(dispatch, "CODEX_ALLOWED_MODELS", SAMPLE_CODEX_POOL)
+    monkeypatch.delenv("OCSR_DISABLE_MODEL_CALLS", raising=False)
+
+    import argparse
+    base = dict(
+        worker=[f"{prompt}|deepseek/deepseek-flash|R1"],
+        output_dir=str(tmp_path),
+        output_pattern="{label}.md",
+        stagger=0, timeout=1, timeout_policy="auto", watch=False, progress=False,
+        harness="cli", meta=[], attempt_index=None, rework_index=None,
+        recovery_safe=False, forbid_paths=[], resume_from=None,
+        backend="opencode", sandbox="read-only", reasoning_effort=None,
+        artifact_mode=None, work_dir=str(tmp_path),
+        dispatch_root=str(tmp_path), ledger_dir=None, allow_overwrite=[],
+        total_timeout=None, renewal_minutes=None, max_renewals=1,
+        diagnostic_session_db=None,
+    )
+    assert dispatch.cmd_dispatch(argparse.Namespace(**base)) == 2
+    assert "--sandbox" in capsys.readouterr().err
+
+    base["backend"] = "nonexistent-cli"
+    base["sandbox"] = None
+    assert dispatch.cmd_dispatch(argparse.Namespace(**base)) == 2
+    assert "Unsupported backend" in capsys.readouterr().err
+
+
+def test_p2_template_backend_still_rejects_invalid_literal_sandbox(tmp_path: Path):
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("hi", encoding="utf-8")
+    spec = {
+        "version": 1,
+        "run": {"id": "tpl-test", "workdir": str(tmp_path / "run")},
+        "vars": {"b": "codex"},
+        "steps": [
+            {
+                "id": "s1",
+                "type": "dispatch",
+                "backend": "{{vars.b}}",
+                "model": "gpt-6.1-sol",
+                "sandbox": "INVALID",
+                "prompt": str(prompt),
+                "output": str(tmp_path / "out.md"),
+            }
+        ],
+    }
+    with pytest.raises(run_spec.SpecError, match="sandbox"):
+        run_spec.validate_spec(
+            spec, spec_path=tmp_path / "spec.yaml",
+            allowed_models=SAMPLE_OPENCODE_POOL,
+            codex_allowed_models=SAMPLE_CODEX_POOL,
+        )
+
+
+def test_p2_codex_parse_phase_maps_failure_events_and_capture_cleans_stale():
+    adapter = backends.get_backend_adapter("codex")
+    assert adapter.parse_phase([{"type": "turn.failed"}]) == "error_reported"
+    assert adapter.parse_phase([{"type": "error"}]) == "error_reported"
+    assert adapter.parse_phase([
+        {"type": "item.completed", "item": {"type": "command_execution", "status": "failed", "exit_code": 1}}
+    ]) == "tool_error_reported"
+    assert adapter.parse_phase([
+        {"type": "item.completed", "item": {"type": "command_execution", "status": "completed", "exit_code": 0}}
+    ]) == "tool_completed"
+    assert adapter.parse_phase([{"type": "some.future.event"}]) == "unknown"
+
+    ps = dispatch._pwsh_code(
+        "echo hi", backend="codex", command_line="echo hi",
+        capture_output_path="C:/tmp/out.md",
+    )
+    assert 'Remove-Item -LiteralPath "$PSScriptRoot/last-message.tmp"' in ps
+    assert "-ErrorAction Stop" in ps
+    assert "$opencodeExit = 2" in ps
