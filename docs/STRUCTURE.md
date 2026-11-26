@@ -8,7 +8,7 @@
 | OCSR 的目标与边界 | [overview.md](overview.md) | 设计或修改 OCSR 行为前 |
 | 本地运行和验证 | [deployment.md](deployment.md) | 执行命令、排查环境时 |
 | 已知陷阱与失败模式 | [pitfalls.md](pitfalls.md)、[../refs/](../refs/) | 派发、审查或故障处理前 |
-| 层级指挥 / 派发模式 / converge 对接 / 模型默认池 | [../refs/](../refs/)（hierarchical-command、dispatch-patterns、converge-integration、model-defaults 等） | SKILL.md 主文件指向具体场景时 |
+| 层级指挥 / 单元组合式调度 / 派发模式 / converge 对接 / 模型默认池 | [../refs/](../refs/)（org-orchestration、hierarchical-command、dispatch-patterns、converge-integration、model-defaults 等） | SKILL.md 主文件指向具体场景或使用 `scripts/ocsr_org.py` 时 |
 | dsh 插件适配层边界与版本锁定 | [../refs/dsh-integration.md](../refs/dsh-integration.md) | 安装/配置/演进 dsh 集成时 |
 | 文档审计 | [audit-checklist.md](audit-checklist.md) | 文档体系变更或定期审计时 |
 | 已完成变更 | [CHANGELOG.md](CHANGELOG.md) | 需要近期历史时；优先用脚本读取 |

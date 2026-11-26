@@ -47,6 +47,7 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 import ocsr_backends as _backends
+import ocsr_runtime as _runtime
 
 # ─── Windows UTF-8 ───────────────────────────────────────────────────
 if sys.platform == "win32":
@@ -425,238 +426,25 @@ _CHDIR_FAILURE_MARKERS = (
 )
 
 
-def _native_path_str(path: "str | os.PathLike | None" = None) -> str:
-    """把路径转成子进程可用的原生绝对路径字符串。
-
-    git-bash/MSYS 的 ``$PWD`` 是 ``/c/...`` 形式，``opencode`` 按 ``$PWD`` 定位
-    工作目录时无法 chdir（报 ``Failed to change directory``）。Windows 下统一转成
-    ``C:/...`` 形式；POSIX 原样返回，不改变既有的 Linux/macOS 行为。
-    """
-    raw = os.fspath(path) if path is not None else os.getcwd()
-    text = str(raw)
-    if sys.platform != "win32":
-        return text
-    match = _MSYS_DRIVE_PATH.match(text)
-    if match:
-        drive = match.group(1).upper()
-        rest = (match.group(2) or "").replace("/", "\\")
-        text = f"{drive}:\\{rest}" if rest else f"{drive}:\\"
-    try:
-        absolute = os.path.abspath(text)
-    except (OSError, ValueError):
-        absolute = text
-    return absolute.replace("\\", "/")
-
-
-def _child_env_with_native_pwd(path: "str | os.PathLike | None" = None) -> dict[str, str] | None:
-    """返回把 ``PWD`` 规范成原生路径的子进程环境；POSIX 返回 None（继承原环境）。"""
-    if sys.platform != "win32":
-        return None
-    env = dict(os.environ)
-    env["PWD"] = _native_path_str(path)
-    return env
-
-
-def _pwsh_code(
-    text: str,
-    cwd: str | None = None,
-    *,
-    backend: str = _backends.BACKEND_OPENCODE,
-    command_line: str | None = None,
-    capture_output_path: str | None = None,
-) -> str:
-    """生成通用 launcher，保留统一 Job/身份/日志/marker 协议并按后端注入命令与 session 提取。
-
-    ``session-binding.json`` 只在同一次 JSONL 事件流中顶层 session 字段（opencode 为
-    ``sessionID``，codex 为 ``thread_id``）唯一时存在；其中的 ``cwd`` 记录 worker
-    的工作目录（绝对路径），供 ``--resume-from`` 在启动前核对。缺失或歧义只禁止后续
-    resume，不改变本次后端的真实退出码；watcher 不会查询 SQLite 或猜测“最新 session”。
-    """
-    adapter = _backends.get_backend_adapter(backend)
-    fingerprint_source = command_line if command_line is not None else text
-    command_fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
-    # Embed the helper so dispatched launchers remain self-contained across
-    # skill updates. The job is owned by pwsh, never by the dispatcher.
-    job_source = (Path(__file__).with_name("ocsr_launcher_job.cs")).read_bytes()
-    job_source_b64 = base64.b64encode(job_source).decode("ascii")
-    worker_cwd = _native_path_str(cwd if cwd is not None else Path.cwd())
-    cwd_literal = worker_cwd.replace("'", "''")
-    exec_line = (
-        command_line
-        if command_line is not None
-        else f"& opencode run $prompt --format json --standalone {text} '{cwd_literal}'"
-    )
-    sid_field = adapter.session_id_field
-    pre_capture_clean = ""
-    capture_block = ""
-    if capture_output_path:
-        pre_capture_clean = '          Remove-Item -LiteralPath "$PSScriptRoot/last-message.tmp" -Force -ErrorAction SilentlyContinue\n'
-        cap_literal = _native_path_str(capture_output_path).replace("'", "''")
-        capture_block = textwrap.dedent(f"""\
-          if ($opencodeExit -eq 0) {{
-            $captureOk = $false
-            if (Test-Path -LiteralPath "$PSScriptRoot/last-message.tmp" -PathType Leaf) {{
-              $capturedText = Get-Content -LiteralPath "$PSScriptRoot/last-message.tmp" -Raw -Encoding UTF8
-              if (-not [string]::IsNullOrWhiteSpace($capturedText)) {{
-                $targetPath = '{cap_literal}'
-                $targetDir = Split-Path -Parent $targetPath
-                $atomicTmp = "$targetPath.ocsr.tmp.$PID"
-                try {{
-                  if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {{
-                    New-Item -ItemType Directory -Path $targetDir -Force -ErrorAction Stop | Out-Null
-                  }}
-                  [System.IO.File]::WriteAllText($atomicTmp, $capturedText, [Text.UTF8Encoding]::new($false))
-                  Move-Item -LiteralPath $atomicTmp -Destination $targetPath -Force -ErrorAction Stop
-                  $captureOk = $true
-                }} catch {{
-                  Remove-Item -LiteralPath $atomicTmp -Force -ErrorAction SilentlyContinue
-                  "capture-reply commit failed: $_" | Add-Content "$PSScriptRoot/error.log" -Encoding UTF8
-                }}
-              }}
-            }}
-            if (-not $captureOk) {{
-              "capture-reply failed: missing or empty last-message.tmp" | Add-Content "$PSScriptRoot/error.log" -Encoding UTF8
-              $opencodeExit = 2
-            }}
-          }}
-        """)
-        capture_block = "\n".join("          " + ln if ln else "" for ln in capture_block.splitlines()) + "\n"
-    return textwrap.dedent(f"""\
-        if ($env:OCSR_DISABLE_MODEL_CALLS -eq '1') {{
-            "launcher blocked: OCSR_DISABLE_MODEL_CALLS=1" | Set-Content "$PSScriptRoot/error.log"
-            exit 1
-        }}
-        $selfProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
-        $identity = [ordered]@{{
-            pid = $PID
-            creation_time = ([datetime]$selfProcess.CreationDate).ToUniversalTime().Ticks.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-            command_fingerprint = "{command_fingerprint}"
-        }}
-        $identity | ConvertTo-Json -Compress | Set-Content "$PSScriptRoot/process-identity.json" -Encoding UTF8
-        "pwsh started $(Get-Date -Format o)" | Set-Content "$PSScriptRoot/start.marker"
-        try {{
-          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-          $OutputEncoding = [Console]::OutputEncoding
-          if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {{
-            $jobSource = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{job_source_b64}'))
-            Add-Type -TypeDefinition $jobSource -ErrorAction Stop
-            [OcsrLauncherJob]::AttachCurrentProcess()
-          }}
-          Set-Location -LiteralPath '{cwd_literal}'
-          $env:PWD = '{cwd_literal}'
-          $prompt = Get-Content "$PSScriptRoot/prompt.txt" -Raw -Encoding UTF8
-{pre_capture_clean}          $sessionIDs = [System.Collections.Generic.HashSet[string]]::new()
-          {exec_line} 2> "$PSScriptRoot/stderr.log" | ForEach-Object {{
-            $line = [string]$_
-            $line | Add-Content "$PSScriptRoot/run.log" -Encoding UTF8
-            try {{
-              $event = $line | ConvertFrom-Json -ErrorAction Stop
-              $sessionProperty = $event.PSObject.Properties['{sid_field}']
-              if ($null -ne $sessionProperty -and $sessionProperty.Value -is [string] -and $sessionProperty.Value.Trim()) {{
-                [void]$sessionIDs.Add($sessionProperty.Value.Trim())
-                if ($sessionIDs.Count -eq 1) {{
-                  $binding = [ordered]@{{
-                    session_id = @($sessionIDs)[0]
-                    backend = '{adapter.name}'
-                    cwd = '{cwd_literal}'
-                    pid = $identity.pid
-                    creation_time = $identity.creation_time
-                    command_fingerprint = $identity.command_fingerprint
-                  }}
-                  $binding | ConvertTo-Json -Compress | Set-Content "$PSScriptRoot/session-binding.json" -Encoding UTF8
-                }} elseif ($sessionIDs.Count -gt 1) {{
-                  Remove-Item "$PSScriptRoot/session-binding.json" -Force -ErrorAction SilentlyContinue
-                }}
-              }}
-            }} catch {{ }}
-          }}
-          $opencodeExit = $LASTEXITCODE
-          if ($sessionIDs.Count -ne 1) {{
-            Remove-Item "$PSScriptRoot/session-binding.json" -Force -ErrorAction SilentlyContinue
-          }}
-{capture_block}          "exit=$opencodeExit" | Add-Content "$PSScriptRoot/start.marker"
-        }} catch {{
-          $_ | Out-File "$PSScriptRoot/error.log" -Encoding UTF8
-          "exit=1" | Add-Content "$PSScriptRoot/start.marker"
-        }}
-    """)
-
-
-def _write_utf8(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
-
-
-PID_FILE_NAME = "pid.txt"
-
-
-def _spawn_windowless(args: list[str], env: dict[str, str] | None = None) -> subprocess.Popen:
-    """以**不分配 console 窗口 + 不继承父进程句柄**的方式启动进程（Windows 关键）。
-
-    为什么弃用 `Start-Process`：
-    - `Start-Process pwsh ... -WindowStyle Hidden` 走 ShellExecute，会**先创建一个 console
-      窗口再隐藏**（实测该进程 `GetConsoleWindow() != 0`）——那一瞬会闪一下并**夺取前台
-      键盘焦点**，打断正在输入的用户；launcher 内的 `opencode`/`node` 还会继承/再建 console，
-      导致一次派发连续闪烁。
-    - `CREATE_NO_WINDOW` 让子进程**根本不分配 console**（实测 `GetConsoleWindow() == 0`），
-      后代随之无窗口。
-
-    为什么 stdio 指向 DEVNULL 且 `close_fds=True`：
-    - 若子进程继承父进程的 stdout/stderr 句柄，它会持住调用方（python `capture_output`）的
-      管道写端，使调用方直到子进程结束才 EOF——实测把 `subprocess.run` 阻塞 12.5s（≈ 子进程
-      全程），破坏"脱管启动"语义。指向 DEVNULL + `close_fds=True` 即断开继承。
-
-    为什么**不**加 `DETACHED_PROCESS`：实测该标志使子进程 stdio 管道失效
-    （`capture_output` 读回空串）、且 launcher 内的 `opencode` 管道不再工作（run.log 0 字节）。
-    worker 由 dispatcher 的 `--watch` 期间持有，无需真正的进程级脱管。
-    """
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
-    return subprocess.Popen(
-        args,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=flags,
-        env=env,
-    )
+_native_path_str = _runtime._native_path_str
+_child_env_with_native_pwd = _runtime._child_env_with_native_pwd
+_pwsh_code = _runtime._pwsh_code
+_write_utf8 = _runtime._write_utf8
+PID_FILE_NAME = _runtime.PID_FILE_NAME
+_spawn_windowless = _runtime._spawn_windowless
 
 
 def _launch_worker(wd: Path) -> int:
-    """**无窗口、脱管**启动 `pwsh -File <wd>/launcher.ps1`，把子进程 PID 写入
-    `<wd>/pid.txt` 并返回该 PID。
-
-    看门狗只接受这里捕获的真实 PID；watcher 自身不负责恢复或再次拉起 worker。
-    """
-    proc = _spawn_windowless(
-        ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wd / "launcher.ps1")],
-        env=_child_env_with_native_pwd(wd),
-    )
-    (wd / PID_FILE_NAME).write_text(f"{proc.pid}\n", encoding="ascii")
-    return proc.pid
+    """无窗口、脱管启动 pwsh -File <wd>/launcher.ps1，写 pid.txt 并返回 PID。"""
+    return _runtime._launch_worker(wd, spawn_fn=_spawn_windowless)
 
 
-def _read_pid(wd: Path) -> int | None:
-    """读取 <wd>/pid.txt。返回 None 表示 PID 不可用（未捕获/文件损坏）。"""
-    try:
-        raw = (wd / PID_FILE_NAME).read_text(encoding="utf-8", errors="replace").strip()
-    except (OSError, AttributeError):
-        return None
-    m = re.search(r"\d+", raw)
-    return int(m.group(0)) if m else None
-
-
-PROCESS_IDENTITY_FILE = "process-identity.json"
+_read_pid = _runtime._read_pid
+PROCESS_IDENTITY_FILE = _runtime.PROCESS_IDENTITY_FILE
 SESSION_BINDING_FILE = "session-binding.json"
 WORKER_STATE_FILE = "worker-state.json"
 RESUME_MATERIAL_FILE = "resume-material.json"
-
-
-def _read_json_object(path: Path) -> dict | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError, UnicodeError):
-        return None
-    return value if isinstance(value, dict) else None
+_read_json_object = _runtime._read_json_object
 
 
 def _read_event_log(log_file: Path) -> tuple[list[dict], dict]:
@@ -930,120 +718,16 @@ def _resume_row_fields(p: dict) -> dict[str, object]:
     }
 
 
-def _decode_native(data: bytes | str | None) -> str:
-    """原生命令输出的容错解码：UTF-8 strict 优先，失败按本机代码页（Windows mbcs）。
-
-    背景：PowerShell/tasklist 等在本机代码页（CP936）输出中文，-X utf8 下
-    subprocess text=True 会按 UTF-8 解码而整体失败（UnicodeDecodeError）。
-    按字节读取后显式解码，个别非 UTF-8 字节不再导致整个读取失败。
-    统一 CRLF→LF（与原 text=True 的 universal newlines 行为一致）。
-    已知限制：整条流二选一（UTF-8 strict 失败才按本机代码页），混合编码流的
-    边缘情形可能乱码（git core.quotepath 默认把非 ASCII 路径转义为 ASCII，
-    实际触发概率低）。
-    """
-    if data is None:
-        return ""
-    if isinstance(data, str):
-        text = data
-    else:
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                text = data.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
-            except Exception:
-                text = data.decode("utf-8", errors="replace")
-    return text.replace("\r\n", "\n")
+_decode_native = _runtime._decode_native
 
 
 def _query_process_table() -> dict[int, dict]:
     """读取 Windows 进程 PID/父 PID/创建身份；失败返回空表并由调用方 fail-closed。"""
-    command = (
-        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
-        "Get-CimInstance Win32_Process | ForEach-Object { "
-        "[ordered]@{ ProcessId = [int]$_.ProcessId; "
-        "ParentProcessId = [int]$_.ParentProcessId; "
-        "CreationTimeUtcTicks = ([datetime]$_.CreationDate).ToUniversalTime().Ticks."
-        "ToString([System.Globalization.CultureInfo]::InvariantCulture); "
-        "CommandLine = [string]$_.CommandLine } "
-        "} | ConvertTo-Json -Compress"
-    )
-    try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", command],
-            capture_output=True, timeout=15,
-        )
-    except Exception:
-        return {}
-    if proc is None or getattr(proc, "returncode", 1) != 0 or not (getattr(proc, "stdout", b"") or b"").strip():
-        return {}
-    try:
-        raw = json.loads(_decode_native(proc.stdout))
-    except json.JSONDecodeError:
-        return {}
-    rows = raw if isinstance(raw, list) else [raw]
-    table: dict[int, dict] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            process_id = int(row["ProcessId"])
-            parent_id = int(row.get("ParentProcessId", 0))
-        except (KeyError, TypeError, ValueError):
-            continue
-        table[process_id] = {
-            "parent_pid": parent_id,
-            "creation_time": str(row.get("CreationTimeUtcTicks") or "").strip(),
-            "command": str(row.get("CommandLine") or "")[:200],  # 供误报时核对归属
-        }
-    return table
+    return _runtime._query_process_table(run_fn=subprocess.run)
 
 
-def _ticks_to_iso(ticks: str) -> str:
-    """.NET UTC Ticks 转可读 ISO 时间（拒绝信息里的启动时间展示用）。"""
-    try:
-        t = int(ticks)
-        return datetime.datetime.fromtimestamp((t - 621355968000000000) / 1e7,
-                                               tz=datetime.timezone.utc).isoformat(timespec="seconds")
-    except (ValueError, OverflowError, OSError):
-        return ticks or "?"
-
-
-def _descendant_pids(root_pid: int, table: dict[int, dict],
-                     root_creation_time: str = "") -> set[int]:
-    """遍历 root 的后代，但带身份防护：
-
-    原 root 已退出且其 PID 被复用（当前占用者的 creation_time 与原 root 不同）时，
-    只保留创建时间早于当前占用者的进程（原 root 时代的真正孤儿）；
-    当前占用者的后代（创建时间 >= 当前占用者）不算原 worker 残留。
-    原 root 已退出且未复用（当前无占用者）时，全部后代都算残留。
-    """
-    current = table.get(root_pid)
-    pid_reused = (
-        current is not None and root_creation_time
-        and current.get("creation_time") != root_creation_time
-    )
-    current_creation = current.get("creation_time", "") if pid_reused else ""
-    descendants: set[int] = set()
-    frontier = {root_pid}
-    while frontier:
-        # 只在 root 的直接子进程层按创建时间过滤：原时代孤儿的更晚子孙仍属该 worker，
-        # 不应因创建时间晚于当前占用者而被漏报
-        first_level = frontier == {root_pid}
-        children = set()
-        for pid, info in table.items():
-            if pid in descendants or int(info.get("parent_pid", 0)) not in frontier:
-                continue
-            if pid_reused and first_level:
-                # 当前占用者的后代不是原 worker 的残留；创建时间无法判定的保留并提示核对
-                child_creation = info.get("creation_time") or ""
-                if child_creation and child_creation >= current_creation:
-                    continue
-            children.add(pid)
-        descendants.update(children)
-        frontier = children
-    descendants.discard(root_pid)
-    return descendants
+_ticks_to_iso = _runtime._ticks_to_iso
+_descendant_pids = _runtime._descendant_pids
 
 
 def _write_worker_state(wd: Path, state: dict) -> None:
@@ -2550,70 +2234,13 @@ def _read_start_marker_exit(marker: Path) -> int | None:
 
 
 def _kill_worker(label: str, wd: Path) -> bool:
-    """按 PID 终止进程树；仅在 PID 与已知后代均确认消失时返回 True。
-
-    历史缺陷（2026-08-09 审计）：旧实现按 `WINDOWTITLE eq ocsr-*<label>*` 过滤，
-    但代码从未设置过 pwsh 的窗口标题——`--title` 是传给 opencode 的**会话标题**，
-    且 launcher 以无窗口方式（`CreateNoWindow`）启动，进程在 tasklist 中窗口标题为 N/A。
-    过滤器匹配不到任何进程，且函数无条件 return True，调用点也不检查返回值：
-    看门狗「到期 kill」这条止损纪律在驱动器里实为空操作。
-
-    现按 `_launch_worker` 捕获的真实 PID 终止，校验 taskkill 退出码，并轮询
-    Windows 进程表确认根 PID 与终止前捕获的所有后代都消失。身份不一致、PID
-    复用、残留后代或进程表不可读均 fail-closed。
-    `/T` 连带终止子进程（launcher pwsh → opencode）；只杀目标 PID，
-    不使用 `taskkill /IM`——那会连带杀死正在正常工作的兄弟 worker（见 SKILL.md「默认单 worker 闭环」）。
-    """
-    pid = _read_pid(wd)
-    if pid is None:
-        print(f"[ocsr] ⚠️ {label} 无可用 PID（{PID_FILE_NAME} 缺失或损坏），无法按 PID 终止",
-              file=sys.stderr)
-        return False
-    before = _query_process_table()
-    if not before:
-        print(f"[ocsr] ⚠️ {label} 无法读取进程表，拒绝在未知身份下终止", file=sys.stderr)
-        return False
-    identity = _read_json_object(wd / PROCESS_IDENTITY_FILE)
-    if (
-        identity is None
-        or identity.get("pid") != pid
-        or not str(identity.get("creation_time") or "").strip()
-        or not str(identity.get("command_fingerprint") or "").strip()
-    ):
-        print(f"[ocsr] ⚠️ {label} 缺少完整进程启动身份，拒绝终止未验证 PID={pid}",
-              file=sys.stderr)
-        return False
-    root = before.get(pid)
-    if root is None or root.get("creation_time") != identity.get("creation_time"):
-        print(f"[ocsr] ⚠️ {label} PID={pid} 启动身份不一致（可能 PID 复用），拒绝终止",
-              file=sys.stderr)
-        return False
-    tracked = {pid} | _descendant_pids(pid, before)
-    try:
-        proc = subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(pid)],
-            capture_output=True, timeout=15,
-        )
-    except Exception as e:
-        print(f"[ocsr] ⚠️ {label} taskkill PID={pid} 异常: {e}", file=sys.stderr)
-        return False
-    if proc.returncode != 0:
-        detail = (_decode_native(proc.stdout) + _decode_native(proc.stderr)).strip()[:200]
-        print(f"[ocsr] ⚠️ {label} taskkill PID={pid} 失败 (rc={proc.returncode}): {detail}",
-              file=sys.stderr)
-        return False
-    remaining = set(tracked)
-    for _ in range(20):
-        after = _query_process_table()
-        if not after:
-            time.sleep(0.25)
-            continue
-        remaining = tracked.intersection(after)
-        if not remaining:
-            return True
-        time.sleep(0.25)
-    print(f"[ocsr] ⚠️ {label} 终止后仍存在 PID/后代: {sorted(remaining)}", file=sys.stderr)
-    return False
+    """按 PID 终止进程树；仅在 PID 与已知后代均确认消失时返回 True。"""
+    return _runtime.kill_process_tree_verified(
+        label,
+        wd,
+        query_table_fn=_query_process_table,
+        run_fn=subprocess.run,
+    )
 
 
 def _check_output_landed(
