@@ -23,7 +23,7 @@ OCSR（OpenCode Subagents Run）以 headless `opencode run` 派发可选模型�
 
 派发前向用户披露模型与调用总上限；未经新鲜授权不突破该上限。每个 worker 最多 **3 次总尝试**。有副作用但不能证明幂等性的任务，**禁止自动重派**。
 
-为每个 worker 指定唯一、明确的绝对输出路径和唯一 label；`--output-pattern` 不会约束实际写入位置。输入、输出路径、`--dir`、prompt 禁令和路径审计都不是安全沙箱：它们只作 best-effort 协作约束，不能阻止恶意或失控进程访问/改写可访问位置。
+为每个 worker 指定唯一、明确的绝对输出路径和唯一 label；`--output-pattern` 不会约束实际写入位置。prompt 中的绝对产物路径、`--output-dir` 与 `--output-pattern` 必须指向同一文件。OpenCode exit 0 不等于 dispatch 成功；出现 `path_anomaly` 时先读 `run.log` 定位实际产物，再由 orchestrator 独立读取、校验 hash/完整性后才能采用，且仍保留 dispatch 失败记录。输入、输出路径、`--dir`、prompt 禁令和路径审计都不是安全沙箱：它们只作 best-effort 协作约束，不能阻止恶意或失控进程访问/改写可访问位置。
 
 ### 2. 写自足 prompt
 
@@ -51,7 +51,7 @@ OCSR（OpenCode Subagents Run）以 headless `opencode run` 派发可选模型�
 python scripts/ocsr_dispatch.py dispatch --worker "<prompt>|<model>|<label>" --output-dir <dir> --output-pattern <unique-name> --watch
 ```
 
-驱动器负责错峰、看门狗、输出存在性/快照比对与 telemetry（`dispatch-log`），不替代编排判断。OpenCode 宿主的 shell 工具默认超时只有 **120 秒**，而前台 `--watch` 派发要阻塞到看门狗总期限（`--timeout × (max-renewals + 1)`，默认配置即 15×2=30 分钟）：**前台派发的 shell 调用必须显式指定 timeout ≥ 本次派发的总期限**（另留启动与验收余量），否则第一次派发就会在 120 秒被宿主切断——watcher 失明后已脱管的 worker 继续消耗模型，任务极易被误判失败而重派。前台 timeout 足够时优先前台运行；需要并发、`Start-Process` 脱管、双监视、静默停滞处理或完整失败切换阶梯时，读取 [`refs/dispatch-patterns.md`](refs/dispatch-patterns.md)。该文件的**脱管派发模式**定义 launcher、`Start-Process` 与双监视；其中的硬事实仍是：脱管进程必须设阈值；默认 15 分钟且可按 `max(10 分钟, 1.5 × 实测耗时)` 调整；模型端静默停滞须按完整指纹裁决。`harness 前台超时 < 单轮耗时` 时也不能以无限轮询代替看护，给不出足够长的前台超时就改走脱管派发模式。用至少 **≥5 次** 同类遥测样本再调整默认模型或阈值，不能以个例翻转默认。
+驱动器负责错峰、看门狗、输出存在性/快照比对与 telemetry（`dispatch-log`），不替代编排判断。**主动拉起只读看板**：只要启动了 OCSR 派发（无论是 `ocsr_dispatch.py` 还是 `ocsr_org.py`），必须主动在后台拉起只读看板（`python scripts/ocsr_board.py`，使用自定义运行根目录时一并传 `--work-dir` / `--org-root`；端口默认 8787，旧实例自动替换，无访问时自动空闲退出），并把本机地址告知用户以便实时查看进度与组织树。OpenCode 宿主的 shell 工具默认超时只有 **120 秒**，而前台 `--watch` 派发要阻塞到看门狗总期限（`--timeout × (max-renewals + 1)`，默认配置即 15×2=30 分钟）：**前台派发的 shell 调用必须显式指定 timeout ≥ 本次派发的总期限**（另留启动与验收余量），否则第一次派发就会在 120 秒被宿主切断——watcher 失明后已脱管的 worker 继续消耗模型，任务极易被误判失败而重派。前台 timeout 足够时优先前台运行；需要并发、`Start-Process` 脱管、双监视、静默停滞处理或完整失败切换阶梯时，读取 [`refs/dispatch-patterns.md`](refs/dispatch-patterns.md)。该文件的**脱管派发模式**定义 launcher、`Start-Process` 与双监视；其中的硬事实仍是：脱管进程必须设阈值；默认 15 分钟且可按 `max(10 分钟, 1.5 × 实测耗时)` 调整；模型端静默停滞须按完整指纹裁决。`harness 前台超时 < 单轮耗时` 时也不能以无限轮询代替看护，给不出足够长的前台超时就改走脱管派发模式。用至少 **≥5 次** 同类遥测样本再调整默认模型或阈值，不能以个例翻转默认。
 
 失败切换阶梯、切换 family 与通道例外的操作细则在该专题；达到三次上限则停止并交回用户。`--fork` 不是默认路径；若使用，必须同时有 `--continue` 或 `--session`。
 
@@ -78,6 +78,7 @@ worker 正常完成后按验收清单返工时，可用 `dispatch --resume-from 
 | fresh 对抗评审 | [`refs/failure-modes.md`](refs/failure-modes.md) | 输入最小化、布局隔离、禁读、`reads:` 审计、作废或新会话重派 |
 | converge Spawn 后端 | [`refs/converge-integration.md`](refs/converge-integration.md) | reserve/settle、invocation 事件、provenance 诚实降级 |
 | 多步骤、路由、断点续跑 | [`refs/run-spec.md`](refs/run-spec.md) | schema、journal 与确定性路由；仅已成功提取却未命中具名 route 的值经 `"*"` 进入 `pause`，契约失败 fail-closed |
+| 单元组合式动态组织树调度 | [`refs/org-orchestration.md`](refs/org-orchestration.md) | 5 命令原语、三角色边界、预算守恒与看板组织树 |
 | 层级指挥 | [`refs/hierarchical-command.md`](refs/hierarchical-command.md) | 归属、状态、看护和独立验收 |
 | 发布 executor | [`refs/release-executor.md`](refs/release-executor.md) | 输入合同、manifest 与保护默认 |
 

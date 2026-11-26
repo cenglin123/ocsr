@@ -1,8 +1,10 @@
 # 当前状态与交接
 
-更新时间：2026-11-24
+更新时间：2026-11-26
 
 ## 当前状态
+
+- 2026-11-26 单元组合式 CLI 调度框架与只读组织树看板（Phase 1/2/3）已落地：计划见 `docs/plans/active/20261126-composable-cli-orchestrator.md`，使用手册见 `refs/org-orchestration.md`。抽离共享底层 `scripts/ocsr_runtime.py`（进程表身份校验、验证式进程树终止、Windows `KILL_ON_JOB_CLOSE` launcher 生成、OS 文件锁与原子写，`ocsr_dispatch.py` 零语义变更复用）；新增 `scripts/ocsr_org.py`（面向 Agent 的 5 条核心命令 `init/spawn/wait/status/stop` + `close`，自动识别 `opencode`/`codex`、自动承接环境上下文、后端静默执行三段预算守恒、跨 run 规范工作树写租约、两级幂等、启动宽限期与读时惰性对账，Phase 1 对 `converge` 上下文 fail-closed 禁用）；升级 `scripts/ocsr_board.py` 与 `scripts/board/index.html`（新增只读组织树扫描、`GET /api/org-unit` 节点详情接口与防路径穿越/符号链接校验、前端「组织树 / 单次派发」双 Tab 与右侧详情抽屉）。验证：`pytest tests/ -q` 534 passed（含 17 项 `test_ocsr_org.py` 与真实 Windows 两级嵌套 Job 实测）、`verify_ocsr_skill.py` 全过、`audit.py check` 13/13、`node --check` 通过、真实双后端递归狗食（`opencode` deepseek 子编排 → `opencode` worker + `codex` 只读 `gpt-6.2-sol` reviewer）一次闭环。`SKILL.md` / `docs/overview.md` 治理正文未动（留待独立 `ultraverge`）。
 
 - 2026-11-24 多后端执行抽象与 Codex CLI 后端（Phase 0/1/2/2.5）已落地并通过执行后代码审计（Codex 3 轮 fresh 只读复审最终 ACCEPT，修复了 `reasoning_effort` 转义注入、Codex 白名单延迟加载与非法 UTF-8 隔离、恢复目录前置校验顺序、确定性配置错误返回退出码 `2`、dsh schema 声明、Board 返工模板、`capture-reply` 原子提交失败置 `exit=2`、模板 backend 字面量校验及失败事件阶段映射）：计划见 `docs/plans/active/20261124-multi-backend-codex.md`。新增薄适配层 `scripts/ocsr_backends.py`、`scripts/ocsr_dispatch.py`、`scripts/ocsr_run_spec.py`、`scripts/ocsr_board.py`、`scripts/board/index.html`、`lib/tool-ocsr.js`；517 passed（500+17）、verify 13/13、audit 通过。Phase 3（修改 `SKILL.md` / `docs/overview.md` 的 `ultraverge` 治理审查与外部 `converge` 适配层门禁）留待后续独立推进。
 

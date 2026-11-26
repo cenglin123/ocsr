@@ -21,6 +21,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,10 +29,11 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 APP_NAME = "ocsr_board"
 APP_VERSION = 1
@@ -42,6 +44,8 @@ OCSR_HOME = Path.home() / ".ocsr"  # 与 dispatcher 的 DISPATCH_LOG 一致，�
 DISPATCH_LOG = OCSR_HOME / "dispatch-log.jsonl"
 GROUPS_PATH = OCSR_HOME / "board-groups.json"
 DISPATCH_ROOTS_REGISTRY = OCSR_HOME / "dispatch-roots.json"  # 驱动器登记的派发根（只读）
+ORG_ROOTS_REGISTRY = OCSR_HOME / "org-roots.json"  # ocsr_org 登记的组织树根（只读）
+DEFAULT_ORG_ROOT = OCSR_HOME / "runs"
 INDEX_HTML = Path(__file__).resolve().parent / "board" / "index.html"
 LOCK_PATH = OCSR_HOME / "board.lock"
 _LAST_ACTIVITY = {"at": time.monotonic()}  # 有页面在看的最近请求时间（驱动空闲退出）
@@ -49,6 +53,9 @@ _LAST_ACTIVITY = {"at": time.monotonic()}  # 有页面在看的最近请求时�
 DIR_NAME_RE = re.compile(r"^ocsr_dispatch_(\d{8})_(\d{6})_[0-9a-f]+$")
 MODEL_RE = re.compile(r"\s-m\s+(\S+)")
 EXIT_RE = re.compile(r"^exit=(\d+)$")
+ORG_RUN_ID_RE = re.compile(r"org-[A-Za-z0-9_-]+")
+ORG_UNIT_ID_RE = re.compile(r"u[0-9]{4}-[A-Za-z0-9_-]+")
+ORG_PREVIEW_BYTES = 4096
 
 # worker-state.json 的显式终态（见 ocsr_dispatch.py 写入点）；
 # 其余值（launched/running/inspection_due/renewed/reported/terminating/unknown 等）
@@ -68,7 +75,7 @@ def _load_json(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
         return {}
 
 
@@ -495,7 +502,16 @@ def save_assignment(key: str, group: str, path: Path = GROUPS_PATH) -> dict[str,
 
 def registered_dispatch_roots() -> list[Path]:
     """读驱动器登记的派发根（~/.ocsr/dispatch-roots.json）：近 30 天且仍存在。"""
-    roots = _load_json(DISPATCH_ROOTS_REGISTRY).get("roots")
+    return _read_registered_roots(DISPATCH_ROOTS_REGISTRY)
+
+
+def registered_org_roots() -> list[Path]:
+    """读 ocsr_org 登记的组织树根（~/.ocsr/org-roots.json）：近 30 天且仍存在。"""
+    return _read_registered_roots(ORG_ROOTS_REGISTRY)
+
+
+def _read_registered_roots(registry_path: Path) -> list[Path]:
+    roots = _load_json(registry_path).get("roots")
     if not isinstance(roots, list):
         return []
     now = datetime.now().astimezone()
@@ -521,6 +537,307 @@ def registered_dispatch_roots() -> list[Path]:
         except OSError:
             continue
     return out
+
+
+def effective_org_roots(extra: list[Path] | None = None) -> list[Path]:
+    """组织树只读扫描根：默认 ~/.ocsr/runs + 登记的 org 根 + CLI 额外根（去重）。"""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in [DEFAULT_ORG_ROOT] + list(extra or []) + registered_org_roots():
+        try:
+            if not p.is_dir():
+                continue
+            resolved = os.path.normcase(str(p.resolve(strict=True)))
+            if resolved not in seen:
+                out.append(p)
+                seen.add(resolved)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return out
+
+
+def _org_path_is(path: Path, kind: Any) -> bool:
+    """检查 org 内部路径本身，拒绝符号链接和 Windows 重解析点。"""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return kind(info.st_mode) and not (
+        getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _org_json(path: Path) -> dict[str, Any]:
+    return _load_json(path) if _org_path_is(path, stat.S_ISREG) else {}
+
+
+def _org_run_config(run_dir: Path) -> dict[str, Any]:
+    if not ORG_RUN_ID_RE.fullmatch(run_dir.name) or not _org_path_is(run_dir, stat.S_ISDIR):
+        return {}
+    cfg = _org_json(run_dir / "run.json")
+    return cfg if cfg.get("run_id") == run_dir.name else {}
+
+
+def _org_preview(path: Path, *, tail: bool = False) -> str:
+    if not _org_path_is(path, stat.S_ISREG):
+        return ""
+    try:
+        with path.open("rb") as stream:
+            if tail:
+                stream.seek(-min(os.fstat(stream.fileno()).st_size, ORG_PREVIEW_BYTES), os.SEEK_END)
+            data = stream.read(ORG_PREVIEW_BYTES)
+    except OSError:
+        return ""
+    if tail:
+        return "\n".join(data.decode("utf-8", errors="ignore").splitlines()[-60:])
+    return data.decode("utf-8-sig", errors="ignore")
+
+
+def _read_org_unit(roots: list[Path], run_id: str, unit_id: str) -> dict[str, Any] | None:
+    for root in roots:
+        run_dir = root / run_id
+        if not _org_run_config(run_dir):
+            continue
+        units_dir = run_dir / "units"
+        unit_dir = units_dir / unit_id
+        if not _org_path_is(units_dir, stat.S_ISDIR) or not _org_path_is(unit_dir, stat.S_ISDIR):
+            return None
+        spec = _org_json(unit_dir / "spec.json")
+        if spec.get("unit_id") != unit_id:
+            return None
+        return {
+            "run_id": run_id,
+            "unit_id": unit_id,
+            "spec": spec,
+            "result": _org_json(unit_dir / "result.json") or None,
+            "summary": _org_json(unit_dir / "summary.json") or None,
+            "prompt_preview": _org_preview(unit_dir / "prompt.txt"),
+            "stderr_tail": _org_preview(unit_dir / "stderr.log", tail=True),
+            "error_tail": _org_preview(unit_dir / "error.log", tail=True),
+        }
+    return None
+
+
+def _read_unit_task_summary(unit_dir: Path) -> str:
+    """从 prompt.txt 提取一行可读任务摘要（跳过自动注入的速查头）。"""
+    p = unit_dir / "prompt.txt"
+    if not _org_path_is(p, stat.S_ISREG):
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for end_tag in ("[/OCSR ORCHESTRATOR QUICKREF]", "[/OCSR SUB-ORCHESTRATOR CONTRACT]"):
+        idx = text.find(end_tag)
+        if idx != -1:
+            text = text[idx + len(end_tag):]
+    for line in text.splitlines():
+        s = line.strip().lstrip("#>-* ").strip()
+        if s:
+            return s[:110] + ("…" if len(s) > 110 else "")
+    return ""
+
+
+def _scan_single_org_run(run_dir: Path) -> dict[str, Any] | None:
+    """严格只读解析单个 org-* 目录，不取锁、不写任何文件。"""
+    run_cfg = _org_run_config(run_dir)
+    if not run_cfg:
+        return None
+    run_state = _org_json(run_dir / "run-state.json")
+    max_calls = run_cfg.get("max_calls", 0)
+    if type(max_calls) is not int or max_calls < 0:
+        return None
+    root_id = str(run_cfg.get("virtual_root_id") or "u0000-root")
+
+    units: dict[str, dict[str, Any]] = {}
+    children_map: dict[str, list[str]] = {}
+    units_dir = run_dir / "units"
+    if _org_path_is(units_dir, stat.S_ISDIR):
+        for entry in sorted(units_dir.iterdir()):
+            uid = entry.name
+            if not ORG_UNIT_ID_RE.fullmatch(uid) or not _org_path_is(entry, stat.S_ISDIR):
+                continue
+            spec = _org_json(entry / "spec.json")
+            budget_alloc = spec.get("budget_alloc", 0)
+            if spec.get("unit_id") != uid or type(budget_alloc) is not int or budget_alloc < 0:
+                continue
+            is_virtual = bool(spec.get("virtual", False))
+            res = _org_json(entry / "result.json")
+            summary = _org_json(entry / "summary.json")
+            marker = entry / "start.marker"
+            marker_exit = _read_exit_code(marker) if _org_path_is(marker, stat.S_ISREG) else None
+            artifacts = res.get("artifacts")
+            warnings = res.get("warnings")
+            parent_id = spec.get("parent_id")
+            units[uid] = {
+                "unit_id": uid,
+                "parent_id": parent_id if isinstance(parent_id, str) else None,
+                "role": str(spec.get("role", "worker")),
+                "virtual": is_virtual,
+                "backend": str(spec.get("backend", "")),
+                "model": str(spec.get("model", "")),
+                "family": str(spec.get("family", "")),
+                "budget_alloc": budget_alloc,
+                "available": max_calls if is_virtual else 0,
+                "held": 0,
+                "status": "virtual" if is_virtual else ("running" if marker_exit is None else ("succeeded" if marker_exit == 0 else "failed")),
+                "elapsed_sec": res.get("elapsed_sec"),
+                "artifacts": [
+                    {"path": a["path"], "size": a["size"], "sha256": a["sha256"]}
+                    for a in artifacts
+                    if isinstance(a, dict) and isinstance(a.get("path"), str)
+                    and type(a.get("size")) is int and isinstance(a.get("sha256"), str)
+                ] if isinstance(artifacts, list) else [],
+                "warnings": [w for w in warnings if isinstance(w, str)] if isinstance(warnings, list) else [],
+                "error_reason": res.get("error_reason"),
+                "decision": summary.get("decision"),
+                "task_summary": "" if is_virtual else _read_unit_task_summary(entry),
+                "settled": False,
+                "budget_settled": False,
+            }
+            if uid != root_id and isinstance(parent_id, str):
+                children_map.setdefault(parent_id, []).append(uid)
+
+    consumed = 0
+    ledger_path = run_dir / "ledger.jsonl"
+    if _org_path_is(ledger_path, stat.S_ISREG):
+        try:
+            # A writer commits an event by terminating its line.
+            raw_lines = ledger_path.read_bytes().split(b"\n")[:-1]
+        except OSError:
+            raw_lines = []
+        for line in raw_lines:
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                ev = json.loads(s)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(ev, dict):
+                continue
+            etype = ev.get("type")
+            uid = ev.get("unit_id")
+            if not isinstance(uid, str) or uid not in units:
+                continue
+            u = units[uid]
+            parent_id = ev.get("parent_id") or u["parent_id"]
+            if parent_id is not None and not isinstance(parent_id, str):
+                continue
+            if etype == "unit_reserved":
+                cb = ev.get("budget_alloc", u["budget_alloc"])
+                if type(cb) is not int or cb < 0:
+                    continue
+                cost = 1 + (cb if u["role"] == "orchestrator" else 0)
+                if parent_id in units:
+                    units[parent_id]["available"] -= cost
+                consumed += 1
+                if u["role"] == "orchestrator":
+                    u["available"] += cb
+            elif etype == "unit_terminal" and not u["settled"]:
+                u["settled"] = True
+                u["status"] = str(ev.get("status", u["status"]))
+                if ev.get("error_reason") and not u["error_reason"]:
+                    u["error_reason"] = ev["error_reason"]
+                warnings = ev.get("warnings")
+                if isinstance(warnings, list):
+                    for warning in warnings:
+                        if isinstance(warning, str) and warning not in u["warnings"]:
+                            u["warnings"].append(warning)
+            elif etype in ("budget_returned", "budget_held") and not u["budget_settled"]:
+                amt = ev.get("amount", 0)
+                if type(amt) is not int or amt < 0:
+                    continue
+                u["available"] -= amt
+                if etype == "budget_held":
+                    u["held"] += amt
+                elif parent_id in units:
+                    units[parent_id]["available"] += amt
+                u["budget_settled"] = True
+            elif etype == "budget_released":
+                amt = ev.get("amount", 0)
+                if type(amt) is int and 0 < amt <= u["held"]:
+                    u["held"] -= amt
+                    if parent_id in units:
+                        units[parent_id]["available"] += amt
+
+    if root_id not in units:
+        return None
+
+    def _build_node(uid: str) -> dict[str, Any]:
+        u = units[uid]
+        return {
+            "unit_id": uid,
+            "role": u["role"],
+            "virtual": u["virtual"],
+            "backend": u["backend"],
+            "model": u["model"],
+            "family": u["family"],
+            "status": u["status"],
+            "budget_alloc": u["budget_alloc"],
+            "available": u["available"],
+            "held": u["held"],
+            "elapsed_sec": u["elapsed_sec"],
+            "artifacts": u["artifacts"],
+            "warnings": u["warnings"],
+            "error_reason": u["error_reason"],
+            "decision": u["decision"],
+            "task_summary": u["task_summary"],
+            "children": [_build_node(cid) for cid in children_map.get(uid, [])],
+        }
+
+    total_held = sum(u["held"] for u in units.values())
+    total_reserved = sum(u["available"] for u in units.values() if not u["virtual"] and u["available"] > 0)
+    root_avail = units[root_id]["available"]
+
+    return {
+        "run_id": str(run_cfg["run_id"]),
+        "goal": str(run_cfg.get("goal", "")),
+        "run_status": str(run_state.get("status", "active")),
+        "created_at": str(run_cfg.get("created_at", "")),
+        "run_dir": str(run_dir),
+        "budget": {
+            "max_calls": max_calls,
+            "consumed": consumed,
+            "reserved": total_reserved,
+            "held": total_held,
+            "root_available": root_avail,
+        },
+        "tree": _build_node(root_id),
+    }
+
+
+def scan_org_runs(roots: list[Path], days: int = 7) -> list[dict[str, Any]]:
+    """只读扫描组织树根目录下的 org-* 运行记录，按创建时间倒序返回。"""
+    cutoff = datetime.now().astimezone() - timedelta(days=days) if days > 0 else None
+    runs: list[tuple[datetime, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in seen or not ORG_RUN_ID_RE.fullmatch(entry.name):
+                continue
+            try:
+                item = _scan_single_org_run(entry)
+            except (OSError, ValueError, RecursionError):
+                continue
+            if item is None:
+                continue
+            created = _parse_iso(item["created_at"])
+            if created is not None and created.tzinfo is None:
+                try:
+                    created = created.astimezone()
+                except (OSError, ValueError, OverflowError):
+                    created = None
+            if cutoff is not None and created is not None and created < cutoff:
+                continue
+            seen.add(item["run_id"])
+            runs.append((created or datetime.min.replace(tzinfo=timezone.utc), item))
+    runs.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in runs]
 
 
 def effective_roots(base: Path, path: Path = GROUPS_PATH,
@@ -768,9 +1085,12 @@ def build_state(handler: "BoardHandler", force: bool = False) -> dict[str, Any]:
                     del _WORKER_CACHE[key]
             history = read_history(handler.log_path)
             attach_telemetry(workers, history)
+            org_roots = effective_org_roots(getattr(handler, "org_roots", None))
+            org_runs = scan_org_runs(org_roots, handler.days)
             registered = {str(p.resolve()) for p in registered_dispatch_roots()}
             payload = {
                 "workers": workers,
+                "org_runs": org_runs,
                 "history": history,
                 "assignments": cfg["assignments"],
                 "roots": [{"path": str(r), "kind": "default" if r == handler.base_root
@@ -834,6 +1154,7 @@ class BoardHandler(BaseHTTPRequestHandler):
     days = 7
     base_root = Path(tempfile.gettempdir())
     cli_roots: list[Path] = []
+    org_roots: list[Path] = []
     log_path = DISPATCH_LOG
     groups_path = GROUPS_PATH
 
@@ -849,7 +1170,7 @@ class BoardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, data: Any, code: int = 200) -> None:
-        self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
+        self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8", errors="backslashreplace"),
                    "application/json; charset=utf-8")
 
     def _origin_ok(self) -> bool:
@@ -861,7 +1182,7 @@ class BoardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self._origin_ok():
             return
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
         if path == "/api/identity":
             self._json({"app": APP_NAME, "version": APP_VERSION, "pid": os.getpid(),
                         "port": self.server.server_address[1],
@@ -869,6 +1190,20 @@ class BoardHandler(BaseHTTPRequestHandler):
         elif path == "/api/state":
             _LAST_ACTIVITY["at"] = time.monotonic()
             self._json(build_state(self, force="fresh=1" in self.path))
+        elif path == "/api/org-unit":
+            _LAST_ACTIVITY["at"] = time.monotonic()
+            params = parse_qs(query, keep_blank_values=True)
+            run_ids = params.get("run_id", [])
+            unit_ids = params.get("unit_id", [])
+            if (len(run_ids) != 1 or not ORG_RUN_ID_RE.fullmatch(run_ids[0])
+                    or len(unit_ids) != 1 or not ORG_UNIT_ID_RE.fullmatch(unit_ids[0])):
+                self._json({"error": "invalid run_id or unit_id"}, 400)
+                return
+            detail = _read_org_unit(effective_org_roots(self.org_roots), run_ids[0], unit_ids[0])
+            if detail is None:
+                self._json({"error": "not found"}, 404)
+            else:
+                self._json(detail)
         elif path == "/":
             _LAST_ACTIVITY["at"] = time.monotonic()
             try:
@@ -940,6 +1275,8 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=7, help="扫描最近 N 天的派发目录；0=全部")
     ap.add_argument("--work-dir", action="append", default=None,
                     help="在默认 $TEMP 之外追加派发扫描根（可重复）；也可在面板「扫描目录」中在线增删并持久化")
+    ap.add_argument("--org-root", action="append", default=None,
+                    help="追加组织树（ocsr_org）扫描根（可重复；默认自动扫描 ~/.ocsr/runs 与已登记根）")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--idle-timeout", type=int, default=30,
                     help="无页面请求的空闲退出分钟数（默认 30；0=禁用）")
@@ -948,6 +1285,8 @@ def main() -> int:
     BoardHandler.days = args.days
     if args.work_dir:
         BoardHandler.cli_roots = [Path(d) for d in args.work_dir]
+    if args.org_root:
+        BoardHandler.org_roots = [Path(d) for d in args.org_root]
 
     # 探测与正式 bind 之间端口可能被抢占：bind 失败时重走 ensure_port（自动换端口/重启判断）
     server = None
