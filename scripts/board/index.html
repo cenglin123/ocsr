@@ -10,7 +10,7 @@
   color-scheme:dark;
   --bg:#0b0e12; --panel:#11161c; --panel2:#161d25; --panel3:#1b242e;
   --border:#28323d; --border-strong:#3a4857; --text:#e7edf4; --dim:#9aa8b7;
-  --faint:#667687; --accent:#7fa7ff; --accent-bg:#18243a;
+  --faint:#667687; --accent:#7fa7ff; --accent-bg:#18243a; --drawer-w:460px;
   --green:#69d69c; --green-bg:#13291f; --yellow:#e2b86a; --yellow-bg:#2c2416;
   --red:#ff7b72; --red-bg:#311b1c; --violet:#b49af5; --violet-bg:#241d36;
   --mono:ui-monospace,"Cascadia Code","Cascadia Mono",Consolas,"Courier New",monospace;
@@ -34,7 +34,7 @@ input::placeholder{color:var(--faint)}
 select:hover,input:hover{border-color:var(--border-strong)}
 code,pre,.mono{font-family:var(--mono)}
 .page-shell{min-height:100vh;transition:padding-right .18s ease}
-body.drawer-open .page-shell{padding-right:440px}
+body.drawer-open .page-shell{padding-right:var(--drawer-w)}
 .app-header{padding:18px 24px 0;border-bottom:1px solid var(--border);
   background:linear-gradient(180deg,#10161d 0%,#0d1218 100%)}
 .brandline{display:flex;align-items:center;gap:12px;min-height:30px}
@@ -180,7 +180,7 @@ td.ok{color:var(--green)}td.bad{color:var(--red)}td.warn{color:var(--yellow)}
 .org-tree li{position:relative;padding:4px 0}
 .org-tree ul>li::before{content:"";position:absolute;top:-5px;left:-16px;width:1px;height:calc(100% + 9px);background:#344351}
 .org-tree ul>li:last-child::before{height:29px}
-.org-tree ul>li::after{content:"";position:absolute;top:28px;left:-16px;width:17px;height:1px;background:#344351}
+.org-tree ul>li::after{content:"";position:absolute;top:24px;left:-16px;width:17px;height:1px;background:#344351}
 .org-node-line{display:flex;align-items:stretch;gap:5px;min-width:0}
 .node-toggle{align-self:flex-start;flex:none;width:23px;height:25px;margin-top:7px;padding:0;
   border:0;background:transparent;color:var(--faint);font:11px/23px var(--mono)}
@@ -197,21 +197,30 @@ td.ok{color:var(--green)}td.bad{color:var(--red)}td.warn{color:var(--yellow)}
   box-shadow:0 0 0 1px #7fa7ff25}
 .org-node-card.context{opacity:.58}
 .org-node-card.context:hover,.org-node-card.context.selected{opacity:1}
-.node-top{display:flex;align-items:center;gap:7px;min-width:0;flex-wrap:wrap}
+.node-head{display:flex;align-items:center;gap:8px;min-width:0}
+.node-meta{display:flex;align-items:center;gap:5px 9px;flex-wrap:wrap;margin-top:5px;min-width:0}
 .role-tag{display:inline-flex;align-items:center;padding:1px 6px;border-radius:3px;font-size:10px;
-  font-weight:600;line-height:18px;white-space:nowrap}
+  font-weight:600;line-height:18px;white-space:nowrap;flex:none}
 .role-tag.role-orchestrator{background:var(--violet-bg);color:var(--violet)}
 .role-tag.role-worker{background:var(--green-bg);color:var(--green)}
 .role-tag.role-reviewer{background:var(--yellow-bg);color:var(--yellow)}
 .role-tag.role-generic{background:#242c34;color:var(--dim)}
 .org-model{font:500 11px var(--mono);color:var(--text);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node-meta .org-model{color:#c4d0dc}
 .backend-tag{font:10px var(--mono);color:var(--faint);border:1px solid var(--border);padding:0 4px;border-radius:3px}
 .node-elapsed{color:var(--dim);font:11px var(--mono);white-space:nowrap}
 .node-budget{color:var(--faint);font:10px var(--mono);white-space:nowrap}
-.node-warning{color:var(--yellow);cursor:help}
-.node-task{display:block;color:var(--dim);font-size:12px;margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.org-node-card.selected .node-task{color:#c6d2df}
-.node-error{display:block;color:var(--red);font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node-warning{color:var(--yellow);cursor:help;white-space:nowrap}
+.node-task{display:block;flex:1;min-width:0;color:var(--text);font-size:13px;font-weight:500;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node-task.muted{color:var(--dim);font:500 12px var(--mono)}
+.node-head .badge{flex:none}
+.node-uid{margin-left:auto;color:var(--faint);font:10px var(--mono);white-space:nowrap}
+.node-quota{display:inline-flex;align-items:center;gap:5px;color:var(--dim);font:10px var(--mono);white-space:nowrap}
+.node-quota .org-bar{width:36px;height:3px}
+.org-node-card.selected .node-task{color:#fff}
+.node-error{display:block;color:var(--red);font-size:11px;margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node-error::before{content:"✕ ";opacity:.8}
 .org-arts{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
 .org-art-chip{background:#19222b;border:1px solid #2b3945;border-radius:3px;padding:1px 6px;
   font:10px var(--mono);color:#b9c7d4;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -237,42 +246,86 @@ td.ok{color:var(--green)}td.bad{color:var(--red)}td.warn{color:var(--yellow)}
   box-shadow:0 8px 30px #0008;font-size:12px;opacity:0;transition:opacity .18s;pointer-events:none;
   max-width:min(700px,90vw);z-index:80}
 #drawer-backdrop{position:fixed;inset:0;background:#030507aa;z-index:49}
-.unit-drawer{position:fixed;z-index:50;right:0;top:0;bottom:0;width:440px;max-width:100vw;
+.unit-drawer{position:fixed;z-index:50;right:0;top:0;bottom:0;width:var(--drawer-w);max-width:100vw;
   background:#10161d;border-left:1px solid var(--border-strong);box-shadow:-20px 0 60px #0007;
   display:flex;flex-direction:column}
-.drawer-head{display:flex;align-items:flex-start;gap:10px;padding:16px 17px 13px;border-bottom:1px solid var(--border);background:#141c24}
+.drawer-head{display:flex;align-items:flex-start;gap:8px;padding:15px 16px 12px;border-bottom:1px solid var(--border);background:#141c24}
 .drawer-heading{min-width:0;flex:1}
-.drawer-kicker{color:var(--accent);font:10px var(--mono);margin-bottom:4px}
-.drawer-title{font-size:14px;font-weight:600;word-break:break-word}
-.drawer-subtitle{color:var(--faint);font:10px var(--mono);margin-top:4px;word-break:break-all}
-.drawer-close{flex:none;width:29px;height:29px;padding:0;font-size:17px;line-height:25px;background:transparent}
-.drawer-body{overflow:auto;padding:14px 17px 30px;scrollbar-width:thin}
-.drawer-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:13px}
-.drawer-section{margin:0 0 14px;border-top:1px solid var(--border);padding-top:11px}
-.drawer-section h3{font-size:11px;color:var(--dim);font-weight:600;margin:0 0 7px}
+.drawer-kicker{display:flex;align-items:center;gap:7px;flex-wrap:wrap;color:var(--accent);font:10px var(--mono);letter-spacing:.5px;margin-bottom:7px}
+.drawer-title{font-size:14px;font-weight:600;line-height:1.45;word-break:break-word}
+.drawer-ids{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+.id-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:0 7px;border-radius:4px;background:#0d1319;
+  color:#b9c7d4;font:10px/20px var(--mono);cursor:copy;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.id-chip b{color:var(--faint);font-weight:400}
+.drawer-head-tools{display:flex;gap:4px;flex:none}
+.drawer-close,.drawer-reload{flex:none;width:29px;height:29px;padding:0;font-size:15px;line-height:25px;background:transparent}
+.drawer-close{font-size:17px}
+.drawer-body{flex:1;min-height:0;overflow:auto;padding:14px 16px 34px;scrollbar-width:thin}
+.drawer-section{margin:0 0 15px;border-top:1px solid var(--border);padding-top:11px}
+.drawer-section.lead{border-top:0;padding-top:0}
+.drawer-section h3{font-size:11px;color:var(--dim);font-weight:600;margin:0 0 8px;letter-spacing:.3px}
+.drawer-section h3 .n,.drawer-section summary .n{color:var(--faint);font-weight:400;font-family:var(--mono)}
+.sec-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px}
+.sec-head h3{margin:0}
+.sec-tools{margin-left:auto;display:flex;gap:5px;flex-wrap:wrap}
+.mini-btn{padding:1px 7px;font-size:10px;line-height:17px}
 .drawer-section p{margin:0;color:#c0ccd8;font-size:12px;white-space:pre-wrap;word-break:break-word}
 .drawer-section pre{margin:0;padding:9px 10px;border:1px solid var(--border);border-radius:5px;
   background:#0b1117;color:#b8c7d5;font:11px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;
   max-height:330px;overflow:auto}
+.drawer-section pre.prompt-body{max-height:320px;color:#dbe4ee;font-size:11.5px;border-color:#2e3b48}
 .drawer-section details{border:1px solid var(--border);border-radius:5px;background:#0d1319}
-.drawer-section summary{cursor:pointer;padding:7px 9px;color:var(--dim);font-size:11px}
+.drawer-section details+details{margin-top:6px}
+.drawer-section summary{cursor:pointer;padding:6px 9px;color:var(--dim);font-size:11px}
+.drawer-section summary:hover{color:var(--text)}
+.drawer-section summary .tag{color:#c9b8f7;font-family:var(--mono)}
 .drawer-section details pre{border:0;border-top:1px solid var(--border);border-radius:0;max-height:400px}
-.drawer-decision{border-left:2px solid var(--violet);padding-left:10px}
+.drawer-section details.boiler{margin-top:8px;background:transparent;border-style:dashed}
+.drawer-note{color:var(--faint);font-size:11px;margin-top:6px}
+.drawer-note.warn{color:var(--yellow)}
 .drawer-warning{color:var(--yellow)!important}
 .drawer-error{color:var(--red)!important}
-.artifact-list{display:flex;flex-direction:column;gap:8px}
-.artifact-item{padding:8px 9px;border:1px solid var(--border);border-radius:5px;background:#0d1319}
-.artifact-path{font:11px var(--mono);color:var(--text);word-break:break-all}
-.artifact-meta{display:flex;gap:8px;align-items:flex-start;margin-top:5px;color:var(--faint);font:10px var(--mono)}
-.artifact-sha{word-break:break-all;flex:1}
-.artifact-meta button{flex:none;padding:1px 5px;font-size:10px}
-.drawer-actions{display:flex;gap:7px;margin-bottom:13px}
+.kv-grid{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:0;font-size:12px;align-items:baseline}
+.kv-grid dt{color:var(--faint)}
+.kv-grid dd{margin:0;color:var(--text);min-width:0;word-break:break-word}
+.kv-grid .mono{font:11px/1.55 var(--mono);word-break:break-all}
+.kv-grid .sub{color:var(--faint);margin-left:7px;font-size:11px}
+.kv-grid .mini-btn{margin-left:6px;vertical-align:1px}
+.link-btn{padding:0;border:0;background:transparent;color:var(--accent);font:11px var(--mono);text-align:left}
+.link-btn:hover:not(:disabled){background:transparent;border:0;color:#a9c3ff;text-decoration:underline}
+.decision-card{border:1px solid #3a3157;border-left:3px solid var(--violet);border-radius:5px;background:#16132299;
+  padding:9px 11px;color:#e6e0f8;font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.issue-block+.issue-block{margin-top:9px}
+.issue-block .lbl{color:var(--faint);font-size:10px;margin-bottom:3px}
+.issue-list{margin:0;padding-left:17px;font-size:12px;line-height:1.6;word-break:break-word}
+.issue-list li+li{margin-top:2px}
+.issue-list.warn{color:var(--yellow)}
+.issue-list.err{color:var(--red)}
+.path-row{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border:1px solid var(--border);border-radius:5px;background:#0d1319}
+.path-row+.path-row{margin-top:6px}
+.path-row.missing{border-style:dashed;background:transparent}
+.path-main{flex:1;min-width:0}
+.path-name{color:var(--text);font:600 11.5px/1.5 var(--mono);word-break:break-all}
+.path-dir{color:var(--faint);font:10px/1.5 var(--mono);word-break:break-all}
+.path-meta{display:flex;gap:4px 10px;flex-wrap:wrap;margin-top:4px;color:var(--faint);font:10px var(--mono)}
+.path-meta .ok{color:var(--green)}.path-meta .miss{color:var(--yellow)}.path-meta .wait{color:var(--accent)}
+.path-tools{display:flex;flex-direction:column;gap:4px;flex:none}
+.child-list{display:flex;flex-direction:column;gap:5px}
+.child-link{display:flex;align-items:center;gap:7px;width:100%;text-align:left;padding:5px 8px;background:#0d1319}
+.child-link .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.org-table tbody tr.selected td{background:#172235}
+.org-table .node-error{margin-top:2px}
+.run-mix{display:inline-flex;gap:8px;font:11px var(--mono)}
+.run-mix .m-active{color:var(--accent)}.run-mix .m-ok{color:var(--green)}.run-mix .m-bad{color:var(--red)}
+.run-mix .m-warn{color:var(--yellow)}.run-mix .m-dim{color:var(--faint)}
+.org-run-foot .mini-btn{flex:none}
 .drawer-loading{color:var(--dim);padding:24px 0;text-align:center}
 .drawer-loading::before{content:"";display:block;width:18px;height:18px;margin:0 auto 10px;
   border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(min-width:1101px){#drawer-backdrop{display:none}}
-@media(max-width:1100px){body.drawer-open .page-shell{padding-right:0}.unit-drawer{width:min(460px,100vw)}}
+@media(min-width:1600px){:root{--drawer-w:540px}}
+@media(max-width:1100px){body.drawer-open .page-shell{padding-right:0}.unit-drawer{width:min(480px,100vw)}}
 @media(max-width:900px){
   .app-header{padding-left:15px;padding-right:15px}.toolbar{padding-left:15px;padding-right:15px}
   main{padding-left:15px;padding-right:15px}#roots-panel{margin-left:15px;margin-right:15px}
@@ -289,7 +342,7 @@ td.ok{color:var(--green)}td.bad{color:var(--red)}td.warn{color:var(--yellow)}
   .org-body{padding:9px 8px}.org-tree ul{margin-left:7px;padding-left:21px}
   .org-tree ul>li::before,.org-tree ul>li::after{left:-12px}.org-tree ul>li::after{width:13px}
   .node-toggle{width:18px}.org-node-card{padding:8px 8px 8px 10px}.org-model{max-width:180px}
-  .node-budget{display:none}.org-run-foot{flex-direction:column;align-items:flex-start}.org-run-foot .run-budget-detail{margin-left:0}
+  .node-uid,.node-quota .org-bar{display:none}.org-run-foot{flex-direction:column;align-items:flex-start}.org-run-foot .run-budget-detail{margin-left:0}
   .group-title .gname{max-width:38vw}.group-title .gops button{padding:2px 4px}.cards{grid-template-columns:1fr}
   .drawer-body{padding-left:13px;padding-right:13px}
 }
@@ -419,11 +472,13 @@ function fmtTime(iso){
   return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 function fmtSeconds(value){
-  const s=Number(value);if(!isFinite(s)||s<0)return "—";
-  if(s<60)return `${Math.round(s)}s`;
-  if(s<3600)return `${Math.floor(s/60)}m ${Math.round(s%60)}s`;
-  return `${Math.floor(s/3600)}h ${Math.round(s%3600/60)}m`;
+  if(value==null||value==="")return "—";
+  const s=Math.round(Number(value));if(!isFinite(s)||s<0)return "—";
+  if(s<60)return `${s}s`;
+  if(s<3600)return `${Math.floor(s/60)}m ${s%60}s`;
+  return `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`;
 }
+function fmtDateTime(iso){return String(iso||"").replace("T"," ").slice(0,19)||"—";}
 function fmtSize(value){
   const n=Number(value);if(!isFinite(n)||n<0)return "—";
   if(n<1024)return `${n} B`;if(n<1048576)return `${(n/1024).toFixed(1)} KB`;
@@ -487,8 +542,9 @@ function sortWorkers(ws){
 }
 function fmtDur(w){
   const m=w.badge==="active"?(w.duration_min??w.wall_min):(w.wall_min??w.duration_min);
-  if(typeof m!=="number"||!isFinite(m))return "—";
-  return m>=60?`${Math.floor(m/60)}h${Math.round(m%60)}m`:`${m}m`;
+  if(typeof m!=="number"||!isFinite(m)||m<0)return "—";
+  const mins=Math.round(m);
+  return mins>=60?`${Math.floor(mins/60)}h${mins%60}m`:(m<10?`${Math.round(m*10)/10}m`:`${mins}m`);
 }
 function rowView(w){
   const reason=failReason(w);
@@ -652,26 +708,25 @@ function buildOrgView(ignoreStatus=false){
   }
   return result;
 }
-function renderOrgChips(view,facets){
-  const c={active:0,succeeded:0,failed:0,timed_out:0,aborted:0,uncertain:0};
-  for(const item of facets)for(const e of item.entries){if(e.parent&&item.entries.includes(e.parent)&&!e.node)continue;
-    const category=orgCategory(e.node.status);if(category in c)c[category]++;}
-  // facets 包含为匹配节点补出的上级；计数只取直接匹配，需按当前无状态筛选重新统计。
-  const direct={active:0,succeeded:0,failed:0,timed_out:0,aborted:0,uncertain:0};
-  const st=$("f-status").value,mo=$("f-model").value,q=$("f-q").value.trim().toLowerCase();
+function orgFilters(){return {st:$("f-status").value,mo:$("f-model").value,q:$("f-q").value.trim().toLowerCase()};}
+function runQueryMatches(run,q){return !q||[run.run_id,run.goal,run.run_dir].join(" ").toLowerCase().includes(q);}
+function nodeMatches(node,f,runMatch,ignoreStatus=false){
+  return (f.mo==="all"||node.model===f.mo)&&(ignoreStatus||f.st==="all"||orgCategory(node.status)===f.st)&&(runMatch||nodeHaystack(node).includes(f.q));
+}
+function markContext(item){
+  const f=orgFilters(),rm=runQueryMatches(item.run,f.q);
+  for(const e of item.entries)e.context=!nodeMatches(e.node,f,rm);
+}
+function renderOrgChips(view){
+  // 计数 = 在时间 / 模型 / 关键字筛选下“直接匹配”的单元数（不含为展示层级补出的上级）。
+  const f=orgFilters(),c={active:0,succeeded:0,failed:0,timed_out:0,aborted:0,uncertain:0};
   for(const run of DATA.org_runs||[]){
-    if(!timeOk(run.created_at))continue;
-    const runQueryMatch=!q||[run.run_id,run.goal,run.run_dir].join(" ").toLowerCase().includes(q);
-    for(const e of getOrgEntries(run)){
-      if(mo!=="all"&&e.node.model!==mo)continue;
-      if(!runQueryMatch&&!nodeHaystack(e.node).includes(q))continue;
-      const cat=orgCategory(e.node.status);if(cat in direct)direct[cat]++;
-    }
+    if(!timeOk(run.created_at))continue;const rm=runQueryMatches(run,f.q);
+    for(const e of getOrgEntries(run)){if(!nodeMatches(e.node,f,rm,true))continue;const cat=orgCategory(e.node.status);if(cat in c)c[cat]++;}
   }
-  $("f-status").value=st;
-  const chip=(status,label,color)=>`<button class="chip${st===status?" on":""}" data-st="${status}" aria-pressed="${st===status}" title="点击筛选；再点取消">${label}<b${color?` style="color:${color}"`:""}>${direct[status]}</b></button>`;
+  const chip=(status,label,color)=>`<button class="chip${f.st===status?" on":""}" data-st="${status}" aria-pressed="${f.st===status}" title="点击筛选；再点取消">${label}<b${color?` style="color:${color}"`:""}>${c[status]}</b></button>`;
   const total=allOrgEntries().length,shown=view.reduce((n,item)=>n+item.matchedCount,0);
-  $("chips").innerHTML=chip("active","运行中", "var(--accent)")+chip("succeeded","成功","var(--green)")+
+  $("chips").innerHTML=chip("active","运行中","var(--accent)")+chip("succeeded","成功","var(--green)")+
     chip("failed","失败","var(--red)")+chip("timed_out","超时","var(--yellow)")+chip("aborted","停止","")+chip("uncertain","不明","")+
     `<span class="chip static">显示 ${shown} / ${total} 个单元 · ${view.length} / ${(DATA.org_runs||[]).length} 个任务</span>`;
 }
@@ -680,77 +735,101 @@ function artifactChips(node){
   const shown=arts.slice(0,3).map(a=>`<span class="org-art-chip" title="${esc(a.path)} · SHA-256 ${esc(a.sha256||"—")}">▤ ${esc(baseName(a.path))} · ${esc(fmtSize(a.size))}</span>`).join("");
   return `<span class="org-arts">${shown}${arts.length>3?`<span class="org-art-more">+${arts.length-3}</span>`:""}</span>`;
 }
-function renderOrgTreeNode(entry,childrenMap){
+function quotaView(n){
+  if(n.role!=="orchestrator"||!(Number(n.budget_alloc)>0))return "";
+  const alloc=Number(n.budget_alloc),avail=Math.max(0,Number(n.available)||0),held=Number(n.held)||0,pct=Math.min(100,Math.round(avail/alloc*100));
+  return `<span class="node-quota" title="子额度：剩余可用 ${avail} / 分配 ${alloc}${held?`；冻结 ${held}`:""}">额度 ${avail}/${alloc}<span class="org-bar"><i style="width:${pct}%"></i></span>${held?`<span class="node-warning">冻结 ${held}</span>`:""}</span>`;
+}
+function renderOrgTreeNode(entry,childrenMap,runId){
   const n=entry.node,kids=childrenMap.get(entry)||[],collapsed=collapsedOrgNodes.has(entry.key),role=roleInfo(n.role);
-  const selected=selectedUnit&&selectedUnit.runId===String(n._run_id||"")&&false;
-  const isSelected=selectedUnit&&selectedUnit.unitId===String(n.unit_id)&&selectedUnit.runId===entry.key.split("\n")[0];
-  const warnings=Array.isArray(n.warnings)?n.warnings:[];
-  const budget=n.role==="orchestrator"&&Number(n.budget_alloc)>0
-    ?`<span class="node-budget" title="可用 / 分配额度${n.held?`；冻结 ${n.held}`:""}">额度 ${esc(n.available??0)}/${esc(n.budget_alloc)}${n.held?` · 冻结 ${esc(n.held)}`:""}</span>`:"";
+  const isSelected=!!selectedUnit&&selectedUnit.runId===runId&&selectedUnit.unitId===String(n.unit_id);
+  const warnings=Array.isArray(n.warnings)?n.warnings:[],task=n.task_summary||"";
+  const toggleTip=collapsed?"展开下级":"折叠下级";
   return `<li><div class="org-node-line">
-    <button class="node-toggle${kids.length?"":" leaf"}" data-node-toggle="${esc(entry.key)}" aria-expanded="${!collapsed}" title="${collapsed?"展开下级":"折叠下级"}">${kids.length?(collapsed?"▸":"▾"):"·"}</button>
-    <button class="org-node-card role-${role.cls}${entry.context?" context":""}${isSelected?" selected":""}" data-open-unit data-run-id="${esc(entry.key.split("\n")[0])}" data-unit-id="${esc(n.unit_id)}" aria-pressed="${!!isSelected}">
-      <span class="node-top"><span class="role-tag role-${role.cls}">${esc(role.label)}</span>
-        <span class="org-model" title="${esc(n.model||"")}">${esc(shortModel(n.model))}</span>
-        ${n.backend?`<span class="backend-tag">${esc(n.backend)}</span>`:""}${orgStatusBadge(n.status)}
-        ${n.elapsed_sec!=null?`<span class="node-elapsed">${esc(fmtSeconds(n.elapsed_sec))}</span>`:""}${budget}
-        ${warnings.length?`<span class="node-warning" title="${esc(warnings.join("\n"))}">⚠ ${warnings.length}</span>`:""}
-        ${collapsed&&kids.length?`<span class="node-budget">${kids.length} 个直接下级</span>`:""}</span>
-      <span class="node-task" title="${esc(n.task_summary||n.unit_id)}">${esc(n.task_summary||n.unit_id)}</span>
+    <button class="node-toggle${kids.length?"":" leaf"}" data-node-toggle="${esc(entry.key)}" aria-expanded="${!collapsed}" aria-label="${toggleTip}" title="${toggleTip}"${kids.length?"":' tabindex="-1"'}>${kids.length?(collapsed?"▸":"▾"):"·"}</button>
+    <button class="org-node-card role-${role.cls}${entry.context?" context":""}${isSelected?" selected":""}" data-open-unit data-run-id="${esc(runId)}" data-unit-id="${esc(n.unit_id)}" aria-pressed="${isSelected}">
+      <span class="node-head"><span class="role-tag role-${role.cls}">${esc(role.label)}</span>
+        <span class="node-task${task?"":" muted"}" title="${esc(task||n.unit_id)}">${esc(task||n.unit_id)}</span>${orgStatusBadge(n.status)}</span>
+      <span class="node-meta"><span class="org-model" title="${esc(n.model||"")}">${esc(shortModel(n.model))}</span>
+        ${n.backend?`<span class="backend-tag">${esc(n.backend)}</span>`:""}
+        ${n.elapsed_sec!=null?`<span class="node-elapsed" title="耗时">⏱ ${esc(fmtSeconds(n.elapsed_sec))}</span>`:""}${quotaView(n)}
+        ${warnings.length?`<span class="node-warning" title="${esc(warnings.join("\n"))}">⚠ ${warnings.length} 条警告</span>`:""}
+        ${collapsed&&kids.length?`<span class="node-budget">已折叠 ${kids.length} 个下级</span>`:""}
+        ${task?`<span class="node-uid">${esc(n.unit_id)}</span>`:""}</span>
       ${n.error_reason?`<span class="node-error" title="${esc(n.error_reason)}">${esc(n.error_reason)}</span>`:""}${artifactChips(n)}
-    </button></div>${kids.length&&!collapsed?`<ul>${kids.map(k=>renderOrgTreeNode(k,childrenMap)).join("")}</ul>`:""}</li>`;
+    </button></div>${kids.length&&!collapsed?`<ul>${kids.map(k=>renderOrgTreeNode(k,childrenMap,runId)).join("")}</ul>`:""}</li>`;
 }
 function renderOrgTree(item){
-  const childrenMap=new Map(),visibleSet=new Set(item.entries),roots=[];
-  for(const entry of item.entries){entry.context=!item.entries.includes(entry)||false;
+  const rid=String(item.run.run_id),childrenMap=new Map(),visibleSet=new Set(item.entries),roots=[];
+  markContext(item);
+  for(const entry of item.entries){
     if(entry.parent&&visibleSet.has(entry.parent)){if(!childrenMap.has(entry.parent))childrenMap.set(entry.parent,[]);childrenMap.get(entry.parent).push(entry);}
-    else roots.push(entry);}
-  // context 由直接匹配集合标记，在渲染前从 matchedCount 与节点条件重建。
-  const st=$("f-status").value,mo=$("f-model").value,q=$("f-q").value.trim().toLowerCase();
-  const runQueryMatch=!q||[item.run.run_id,item.run.goal,item.run.run_dir].join(" ").toLowerCase().includes(q);
-  for(const e of item.entries)e.context=!( (mo==="all"||e.node.model===mo)&&(st==="all"||orgCategory(e.node.status)===st)&&(runQueryMatch||nodeHaystack(e.node).includes(q)) );
-  return `<ul class="org-tree">${roots.map(e=>renderOrgTreeNode(e,childrenMap)).join("")}</ul>`;
+    else roots.push(entry);
+  }
+  return `<ul class="org-tree">${roots.map(e=>renderOrgTreeNode(e,childrenMap,rid)).join("")}</ul>`;
 }
 function renderOrgTable(item){
+  const rid=String(item.run.run_id);markContext(item);
   const rows=item.entries.map(entry=>{
-    const n=entry.node,role=roleInfo(n.role),arts=Array.isArray(n.artifacts)?n.artifacts:[];
-    const isSelected=selectedUnit&&selectedUnit.unitId===String(n.unit_id)&&selectedUnit.runId===String(item.run.run_id);
+    const n=entry.node,role=roleInfo(n.role),arts=Array.isArray(n.artifacts)?n.artifacts:[],warnings=Array.isArray(n.warnings)?n.warnings:[];
+    const isSelected=!!selectedUnit&&selectedUnit.unitId===String(n.unit_id)&&selectedUnit.runId===rid,task=n.task_summary||"";
     let indent="";for(let i=0;i<entry.depth;i++)indent+=`<span class="depth-guide">${i===entry.depth-1?"└":"│"}</span>`;
-    return `<tr${isSelected?' style="background:#172235"':""}><td class="unit-cell"><button class="table-unit${entry.context?" context":""}" data-open-unit data-run-id="${esc(item.run.run_id)}" data-unit-id="${esc(n.unit_id)}" aria-pressed="${!!isSelected}">
-      <span class="table-unit-line"><span>${indent}</span><span class="role-tag role-${role.cls}">${esc(role.label)}</span><span class="table-unit-title" title="${esc(n.task_summary||n.unit_id)}">${esc(n.task_summary||n.unit_id)}</span></span></button></td>
+    return `<tr${isSelected?' class="selected"':""}><td class="unit-cell"><button class="table-unit${entry.context?" context":""}" data-open-unit data-run-id="${esc(rid)}" data-unit-id="${esc(n.unit_id)}" aria-pressed="${isSelected}">
+      <span class="table-unit-line"><span>${indent}</span><span class="role-tag role-${role.cls}">${esc(role.label)}</span><span class="table-unit-title" title="${esc(task||n.unit_id)}">${esc(task||n.unit_id)}</span></span></button>
+      ${n.error_reason?`<span class="node-error" style="padding-left:${entry.depth*17}px" title="${esc(n.error_reason)}">${esc(n.error_reason)}</span>`:""}</td>
       <td title="${esc(n.model||"")}"><span class="org-model">${esc(shortModel(n.model))}</span>${n.backend?` <span class="backend-tag">${esc(n.backend)}</span>`:""}</td>
       <td>${orgStatusBadge(n.status)}</td><td class="mono">${esc(fmtSeconds(n.elapsed_sec))}</td>
-      <td class="mono">${n.role==="orchestrator"?`${esc(n.available??0)} / ${esc(n.budget_alloc??0)}`:"—"}</td>
-      <td class="table-art">${arts.length?`${arts.length} 个文件`:"—"}${n.warnings&&n.warnings.length?` <span class="node-warning" title="${esc(n.warnings.join("\n"))}">⚠</span>`:""}</td></tr>`;
+      <td class="mono">${n.role==="orchestrator"?`${esc(n.available??0)} / ${esc(n.budget_alloc??0)}${n.held?` <span class="node-warning">冻结 ${esc(n.held)}</span>`:""}`:"—"}</td>
+      <td class="table-art">${arts.length?`<span title="${esc(arts.map(a=>a.path).join("\n"))}">${arts.length} 个文件</span>`:"—"}${warnings.length?` <span class="node-warning" title="${esc(warnings.join("\n"))}">⚠ ${warnings.length}</span>`:""}</td></tr>`;
   }).join("");
-  return `<div class="table-scroll"><table class="org-table"><thead><tr><th>任务 / 委派层级</th><th>模型 / 后端</th><th>状态</th><th>耗时</th><th>额度 可用/分配</th><th>产出</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="table-scroll"><table class="org-table"><thead><tr><th>任务 / 委派层级</th><th>模型 / 后端</th><th>状态</th><th>耗时</th><th>额度 剩余/分配</th><th>产出</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function runMix(run){
+  const c={active:0,succeeded:0,bad:0,warn:0,aborted:0};
+  for(const e of getOrgEntries(run)){const s=e.node.status;
+    if(s==="running"||s==="reserved")c.active++;else if(s==="succeeded")c.succeeded++;else if(s==="failed")c.bad++;
+    else if(s==="timed_out"||s==="uncertain")c.warn++;else if(s==="aborted")c.aborted++;}
+  const parts=[];
+  if(c.active)parts.push(`<span class="m-active" title="运行 / 启动中">● ${c.active}</span>`);
+  if(c.succeeded)parts.push(`<span class="m-ok" title="成功">✓ ${c.succeeded}</span>`);
+  if(c.bad)parts.push(`<span class="m-bad" title="失败">✕ ${c.bad}</span>`);
+  if(c.warn)parts.push(`<span class="m-warn" title="超时 / 状态不明">⚠ ${c.warn}</span>`);
+  if(c.aborted)parts.push(`<span class="m-dim" title="已停止">■ ${c.aborted}</span>`);
+  return {c,html:parts.length?`<span class="run-mix">${parts.join("")}</span>`:""};
+}
+function runBadge(run,c){
+  if(run.run_status!=="active"&&run.run_status!=="aborted"&&(c.bad||c.warn))
+    return c.bad?{cls:"failed",label:"已结束 · 有失败"}:{cls:"timeout",label:"已结束 · 有异常"};
+  return runStatusInfo(run.run_status);
 }
 function renderOrgRuns(view){
   $("groups").hidden=true;$("focus-slot").innerHTML="";$("history-section").hidden=true;$("org-runs").hidden=false;
-  let html=`<div class="section-intro"><div><h2>任务拓扑</h2><p>点击单元查看任务原文、裁决、产物哈希与错误尾部。</p></div>
+  let html=`<div class="section-intro"><div><h2>任务拓扑</h2><p>每个单元首行是任务与状态，次行是模型 · 后端 · 耗时 · 额度；点击查看任务原文、裁决、交付物与日志。</p></div>
     <div class="org-legend"><span class="legend-item"><i class="legend-dot orchestrator"></i>编排</span><span class="legend-item"><i class="legend-dot worker"></i>执行</span><span class="legend-item"><i class="legend-dot reviewer"></i>审查</span></div></div>`;
   if(!view.length){
     if(!(DATA.org_runs||[]).length)html+=emptyPanel("暂无组织任务",DATA.workers.length?"单次派发记录在另一个 Tab 中。":"组织运行记录出现后会自动显示在这里。",DATA.workers.length?`<button data-empty-act="workers">查看单次派发 (${DATA.workers.length})</button>`:"");
     else html+=emptyPanel("当前筛选没有匹配的组织单元","组织树的时间筛选按任务创建时间计算；状态、模型和关键字按单元计算。",clearFiltersButton());
     $("org-runs").innerHTML=html;return;
   }
+  const filtering=hasActiveFilters();
   html+='<div class="org-section">';
   view.forEach((item,idx)=>{
-    const r=item.run,rid=String(r.run_id),b=r.budget||{};
+    const r=item.run,rid=String(r.run_id),b=r.budget||{},mix=runMix(r);
     if(!orgRunOpen.has(rid))orgRunOpen.set(rid,r.run_status==="active"||idx<2);
-    const open=orgRunOpen.get(rid),rs=runStatusInfo(r.run_status),max=Number(b.max_calls)||0,consumed=Number(b.consumed)||0;
+    const open=orgRunOpen.get(rid),rs=runBadge(r,mix.c),max=Number(b.max_calls)||0,consumed=Number(b.consumed)||0;
     const pct=max?Math.min(100,Math.round(consumed/max*100)):0;
+    const countText=filtering&&item.matchedCount<item.totalCount?`${item.matchedCount} / ${item.totalCount} 个单元匹配`:`${item.totalCount} 个单元`;
     html+=`<details class="org-run" data-org-run="${esc(rid)}"${open?" open":""}><summary>
       <span class="org-run-main"><span class="run-caret">▸</span><span class="org-goal" title="${esc(r.goal||rid)}">${esc(r.goal||rid)}</span></span>
-      <span class="org-run-stats"><span class="badge b-${rs.cls}">${esc(rs.label)}</span><span>${item.totalCount} 个单元</span><time>${fmtTime(r.created_at)}</time></span>
-      <span class="org-budget"><span>调用 ${consumed}/${max}</span><span class="org-bar" title="已消费 ${consumed} / ${max}"><i style="width:${pct}%"></i></span></span></summary>
+      <span class="org-run-stats"><span class="badge b-${rs.cls}">${esc(rs.label)}</span>${mix.html}<span>${countText}</span><time datetime="${esc(r.created_at||"")}" title="创建于 ${esc(fmtDateTime(r.created_at))}">${fmtTime(r.created_at)}</time></span>
+      <span class="org-budget" title="已消费 ${consumed} / 上限 ${max} 次调用"><span>调用 ${consumed}/${max}</span><span class="org-bar"><i style="width:${pct}%${pct>=90?";background:var(--yellow)":""}"></i></span></span></summary>
       <div class="org-body">${item.entries.length?($("view-mode").value==="list"?renderOrgTable(item):renderOrgTree(item)):'<div class="empty" style="padding:14px">尚未派发任何单元</div>'}
-      <div class="org-run-foot"><span class="run-path" title="${esc(r.run_dir||"")}">${esc(rid)}${r.run_dir?` · ${esc(r.run_dir)}`:""}</span>
-      <span class="run-budget-detail">根可用 ${esc(b.root_available??0)} · 子树预留 ${esc(b.reserved??0)} · 冻结 ${esc(b.held??0)}</span></div></div></details>`;
+      <div class="org-run-foot"><span class="run-path" title="${esc(r.run_dir||"")}">${esc(rid)}${r.run_dir?` · ${esc(r.run_dir)}`:""}</span>${copyBtn(r.run_dir,"复制目录","已复制 run 目录")}
+      <span class="run-budget-detail" title="根可用：run 根剩余可分配；子树预留：已分给子编排器的额度；冻结：异常单元暂扣、待回收">根可用 ${esc(b.root_available??0)} · 子树预留 ${esc(b.reserved??0)} · 冻结 ${esc(b.held??0)}</span></div></div></details>`;
   });
   html+="</div>";$("org-runs").innerHTML=html;
 }
-function renderOrg(){const view=buildOrgView(false),facets=buildOrgView(true);renderOrgChips(view,facets);renderOrgRuns(view);}
+function renderOrg(){const view=buildOrgView(false);renderOrgChips(view);renderOrgRuns(view);}
 function renderRoots(){
   const rows=(DATA.roots||[]).filter(r=>r.kind!=="custom").map(r=>`<div class="rrow"><span class="kind">${r.kind==="default"?"默认":r.kind==="cli"?"CLI":"登记"}</span>
     <span class="p">${esc(r.path)}</span>${r.kind==="registered"?`<button data-rignore="${esc(r.path)}" title="忽略该登记根（只改面板配置）">忽略</button>`:""}</div>`);
@@ -762,21 +841,26 @@ function currentModels(){
   if(activeTab==="org")return [...new Set(allOrgEntries().map(e=>e.node.model).filter(Boolean))].sort();
   return [...new Set(DATA.workers.map(w=>w.model).filter(Boolean))].sort();
 }
+function setOptions(el,options){
+  const html=options.map(([v,t])=>`<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  if(el.dataset.sig!==html){el.innerHTML=html;el.dataset.sig=html;}
+}
+function setValue(el,v){if(el.value!==v)el.value=v;}
 function syncControls(){
-  const state=controls[activeTab],statusOptions=activeTab==="org"?orgStatusOptions:workerStatusOptions;
-  $("f-status").innerHTML=statusOptions.map(([v,t])=>`<option value="${v}">${t}</option>`).join("");
-  if(!statusOptions.some(([v])=>v===state.status))state.status="all";$("f-status").value=state.status;
-  $("f-model").innerHTML='<option value="all">全部模型</option>'+currentModels().map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join("");
-  if(moExists(state.model))$("f-model").value=state.model;else{state.model="all";$("f-model").value="all";}
-  $("f-time").value=state.time;$("f-q").value=state.q;$("sort-by").value=state.sort;
+  // 只在选项真正变化时重建 <select>，避免轮询关闭用户已展开的下拉框或打断输入法。
+  const state=controls[activeTab],statusOptions=activeTab==="org"?orgStatusOptions:workerStatusOptions,models=currentModels();
+  setOptions($("f-status"),statusOptions);
+  if(!statusOptions.some(([v])=>v===state.status))state.status="all";setValue($("f-status"),state.status);
+  setOptions($("f-model"),[["all","全部模型"],...models.map(m=>[m,m])]);
+  if(state.model!=="all"&&!models.includes(state.model))state.model="all";setValue($("f-model"),state.model);
+  setValue($("f-time"),state.time);setValue($("f-q"),state.q);setValue($("sort-by"),state.sort);
   const views=activeTab==="org"?[["tree","树形视图"],["list","列表视图"]]:[["cards","卡片视图"],["list","列表视图"]];
-  $("view-mode").innerHTML=views.map(([v,t])=>`<option value="${v}">${t}</option>`).join("");
-  if(!views.some(([v])=>v===state.view))state.view=views[0][0];$("view-mode").value=state.view;
+  setOptions($("view-mode"),views);
+  if(!views.some(([v])=>v===state.view))state.view=views[0][0];setValue($("view-mode"),state.view);
   $("f-q").placeholder=activeTab==="org"?"搜索任务 / 单元 / 模型 / 产物":"搜索 label / session / 路径";
   $("f-time").title=activeTab==="org"?"按组织任务创建时间筛选":"按 worker 最近活动时间筛选";
   document.querySelectorAll(".worker-only").forEach(el=>el.hidden=activeTab!=="workers");
 }
-function moExists(model){return model==="all"||currentModels().includes(model);}
 function readControls(){
   const s=controls[activeTab];s.status=$("f-status").value;s.model=$("f-model").value;s.time=$("f-time").value;
   s.q=$("f-q").value;s.sort=$("sort-by").value;s.view=$("view-mode").value;
@@ -792,83 +876,239 @@ function renderTabs(){
   $("tab-org-active").hidden=!(DATA.org_runs||[]).some(r=>r.run_status==="active");
   $("tab-workers-active").hidden=!DATA.workers.some(w=>w.badge==="active");
 }
-function render(){
-  renderTabs();if(activeTab==="org")renderOrg();else renderWorkers();renderRoots();
+function focusSelector(el){
+  // 重绘会替换 DOM；记录焦点元素的稳定选择器，重绘后还原，保证键盘操作不丢位置。
+  if(!el||el===document.body||!document.querySelector("main").contains(el)||typeof CSS==="undefined"||!CSS.escape)return "";
+  const q=v=>CSS.escape(String(v??""));
+  if(el.matches("[data-open-unit]"))return `[data-open-unit][data-run-id="${q(el.dataset.runId)}"][data-unit-id="${q(el.dataset.unitId)}"]`;
+  if(el.matches("[data-node-toggle]"))return `[data-node-toggle="${q(el.dataset.nodeToggle)}"]`;
+  if(el.matches("[data-gact]"))return `[data-gact="${q(el.dataset.gact)}"][data-group="${q(el.dataset.group)}"]`;
+  const host=el.closest("[data-key]");
+  if(host&&el.matches("button[data-act]"))return `[data-key="${q(host.dataset.key)}"] button[data-act="${q(el.dataset.act)}"]`;
+  if(el.tagName==="SUMMARY"&&el.parentElement){const d=el.parentElement;
+    if(d.dataset.orgRun)return `[data-org-run="${q(d.dataset.orgRun)}"]>summary`;if(d.dataset.dt)return `[data-dt="${q(d.dataset.dt)}"]>summary`;}
+  return "";
+}
+let lastSig="",lastRenderAt=0;
+function renderMeta(){
   $("meta").textContent=`更新于 ${(DATA.generated_at||"").replace("T"," ").slice(11,19)||"—"} · 轮询 ${pollMs/1000}s · 缓存 ${DATA.cache_ttl??10}s`;
-  needsRender=false;
+}
+function render(){
+  const fsel=focusSelector(document.activeElement);
+  renderTabs();if(activeTab==="org")renderOrg();else renderWorkers();renderRoots();renderMeta();
+  needsRender=false;lastRenderAt=Date.now();
+  if(fsel){const el=document.querySelector(fsel);if(el&&el!==document.activeElement)el.focus({preventScroll:true});}
+  if(activeTab==="org")syncDrawerWithData();
 }
 async function load(force){
   const seq=++reqSeq;
   try{
     const resp=await fetch("/api/state"+(force?"?fresh=1":""));const data=await resp.json();
     if(!resp.ok||!Array.isArray(data.workers))throw new Error("bad /api/state payload");if(seq!==reqSeq)return false;
+    const sig=JSON.stringify(Object.assign({},data,{generated_at:""})),changed=!!force||sig!==lastSig;lastSig=sig;
     DATA=Object.assign({workers:[],org_runs:[],history:[],assignments:{},roots:[],custom_roots:[],ignored_roots:[]},data);
     if(!Array.isArray(DATA.org_runs))DATA.org_runs=[];
     if(!autoTabResolved){activeTab=DATA.org_runs.length&&!DATA.workers.some(w=>!isArchived(w))?"org":"workers";autoTabResolved=true;}
-    syncControls();$("live-state").classList.remove("offline");$("live-text").textContent="只读连接正常";
+    $("live-state").classList.remove("offline");$("live-text").textContent="只读连接正常";
+    // 数据未变化时不重绘：保留文本选区、hover、展开的下拉框与滚动位置；每 60s 兜底重绘一次刷新相对时间。
+    if(!changed&&!needsRender&&Date.now()-lastRenderAt<60e3){renderMeta();return true;}
+    syncControls();
     if(!dragging&&!suspend)render();else needsRender=true;return true;
   }catch(e){
     if(seq===reqSeq){$("live-state").classList.add("offline");$("live-text").textContent="连接失败";$("meta").textContent="面板服务连接失败 · 点击刷新重试";}return false;
   }
 }
+function findOrgRun(runId){return (DATA.org_runs||[]).find(r=>String(r.run_id)===String(runId))||null;}
 function findOrgNode(runId,uid){
-  const run=(DATA.org_runs||[]).find(r=>String(r.run_id)===String(runId));if(!run)return null;
+  const run=findOrgRun(runId);if(!run)return null;
   const entry=getOrgEntries(run).find(e=>String(e.node.unit_id)===String(uid));return entry?entry.node:null;
 }
 function pretty(value){if(value==null)return "—";if(typeof value==="string")return value;try{return JSON.stringify(value,null,2);}catch(e){return String(value);}}
+function nodeSig(node){
+  if(!node)return "";
+  return JSON.stringify([node.status,node.elapsed_sec,node.decision,node.error_reason,node.warnings,(node.artifacts||[]).map(a=>a.sha256),
+    node.available,node.held,(node.children||[]).map(k=>[k.unit_id,k.status])]);
+}
+function splitPrompt(text){
+  // 把自动注入的 [OCSR ...]...[/OCSR ...] 速查 / 契约块从任务正文中拆出；只在开头出现的未闭合块（预览截断）也视为注入块。
+  let rest=String(text||"");const blocks=[],re=/\[(OCSR [A-Z][A-Z -]*[A-Z])\]/;
+  for(let guard=0;guard<8;guard++){
+    const m=re.exec(rest);if(!m)break;
+    const end=`[/${m[1]}]`,ei=rest.indexOf(end,m.index+m[0].length);
+    if(ei===-1){if(rest.slice(0,m.index).trim())break;
+      blocks.push({tag:m[1],text:rest.slice(m.index+m[0].length).trim(),truncated:true});rest="";break;}
+    blocks.push({tag:m[1],text:rest.slice(m.index+m[0].length,ei).trim(),truncated:false});
+    rest=rest.slice(0,m.index)+rest.slice(ei+end.length);
+  }
+  return {body:rest.trim(),blocks};
+}
+function joinPath(base,...parts){if(!base)return "";const s=String(base).includes("\\")?"\\":"/";return [String(base).replace(/[\\/]+$/,""),...parts].join(s);}
+function normPath(p){return String(p||"").replace(/\\/g,"/").replace(/\/+$/,"").toLowerCase();}
+function dirName(p){const s=String(p||""),i=Math.max(s.lastIndexOf("/"),s.lastIndexOf("\\"));return i>0?s.slice(0,i):"";}
+function lineCount(s){const t=String(s||"");return t?t.split("\n").length:0;}
+function copyBtn(value,label,msg){return value?`<button class="mini-btn" data-copy-value="${esc(value)}" data-copy-msg="${esc(msg||"已复制")}">${esc(label)}</button>`:"";}
+let drawerSig="";
+const drawerOpenState=new Map();
+function detOpen(dkey,def){
+  const st=selectedUnit&&drawerOpenState.get(unitKey(selectedUnit.runId,selectedUnit.unitId));
+  return st&&st.has(dkey)?st.get(dkey):def;
+}
+function det(dkey,summaryHtml,inner,def=false,cls=""){
+  return `<details data-dkey="${esc(dkey)}"${cls?` class="${cls}"`:""}${detOpen(dkey,def)?" open":""}><summary>${summaryHtml}</summary>${inner}</details>`;
+}
 function drawerShell(node,runId,uid,body){
   const role=roleInfo(node?node.role:"");
-  return `<div class="drawer-head"><div class="drawer-heading"><div class="drawer-kicker">UNIT INSPECT · 只读</div>
-    <div class="drawer-title">${esc(node?(node.task_summary||node.unit_id):uid)}</div><div class="drawer-subtitle">${esc(runId)} / ${esc(uid)}</div></div>
-    <button class="drawer-close" id="btn-drawer-close" aria-label="关闭详情">×</button></div>
-    <div class="drawer-body">${node?`<div class="drawer-status"><span class="role-tag role-${role.cls}">${esc(role.label)}</span>${orgStatusBadge(node.status)}
-      <span class="org-model">${esc(shortModel(node.model))}</span><span class="node-elapsed">${esc(fmtSeconds(node.elapsed_sec))}</span></div>`:""}${body}</div>`;
+  return `<div class="drawer-head"><div class="drawer-heading">
+      <div class="drawer-kicker">UNIT INSPECT · 只读${node?`<span class="role-tag role-${role.cls}">${esc(role.label)}</span>${orgStatusBadge(node.status)}`:""}</div>
+      <div class="drawer-title" id="drawer-title">${esc((node&&node.task_summary)||uid)}</div>
+      <div class="drawer-ids"><button class="id-chip" data-copy-value="${esc(uid)}" data-copy-msg="已复制单元 ID" title="点击复制单元 ID"><b>unit</b>${esc(uid)}</button>
+        <button class="id-chip" data-copy-value="${esc(runId)}" data-copy-msg="已复制 run ID" title="点击复制 run ID"><b>run</b>${esc(runId)}</button></div></div>
+    <div class="drawer-head-tools"><button class="drawer-reload" id="btn-unit-reload" title="重新读取证据" aria-label="重新读取证据">⟳</button>
+      <button class="drawer-close" id="btn-drawer-close" title="关闭（Esc）" aria-label="关闭详情">×</button></div></div>
+    <div class="drawer-body">${body}</div>`;
 }
-function detailJsonBlock(title,value,open=false){
-  if(value==null)return "";return `<section class="drawer-section"><details${open?" open":""}><summary>${esc(title)}</summary><pre>${esc(pretty(value))}</pre></details></section>`;
-}
-function renderUnitDetail(detail){
-  if(!selectedUnit)return;const {runId,unitId}=selectedUnit,node=findOrgNode(runId,unitId);
-  const result=detail.result||{},summary=detail.summary||{},arts=Array.isArray(result.artifacts)?result.artifacts:(node&&node.artifacts)||[];
-  const decision=summary.decision??(node&&node.decision),warnings=[...new Set([...(node&&node.warnings||[]),...(result.warnings||[])])];
-  let body=`<div class="drawer-actions"><button id="btn-unit-reload">重新加载详情</button><button id="btn-copy-unit">复制单元 ID</button></div>`;
-  if(decision)body+=`<section class="drawer-section"><h3>裁决 / 交接结论</h3><p class="drawer-decision">${esc(pretty(decision))}</p></section>`;
-  if(warnings.length)body+=`<section class="drawer-section"><h3>警告</h3><p class="drawer-warning">${esc(warnings.join("\n"))}</p></section>`;
-  if(result.error_reason||node&&node.error_reason)body+=`<section class="drawer-section"><h3>失败原因</h3><p class="drawer-error">${esc(result.error_reason||node.error_reason)}</p></section>`;
-  body+=`<section class="drawer-section"><h3>任务原文预览</h3><pre>${esc(detail.prompt_preview||"没有 prompt 预览")}</pre></section>`;
-  body+=`<section class="drawer-section"><h3>产物与 SHA-256 (${arts.length})</h3>${arts.length?`<div class="artifact-list">${arts.map(a=>`<div class="artifact-item"><div class="artifact-path">${esc(a.path)}</div>
-    <div class="artifact-meta"><span>${esc(fmtSize(a.size))}</span><span class="artifact-sha">${esc(a.sha256||"—")}</span>
-    ${a.sha256?`<button data-copy-value="${esc(a.sha256)}" data-copy-msg="已复制 SHA-256">复制哈希</button>`:""}</div></div>`).join("")}</div>`:'<p style="color:var(--faint)">没有已登记产物</p>'}</section>`;
-  if(detail.stderr_tail)body+=`<section class="drawer-section"><h3>stderr 尾部</h3><pre class="drawer-warning">${esc(detail.stderr_tail)}</pre></section>`;
-  if(detail.error_tail)body+=`<section class="drawer-section"><h3>error 尾部</h3><pre class="drawer-error">${esc(detail.error_tail)}</pre></section>`;
-  body+=detailJsonBlock("执行结果 result.json",result,true)+detailJsonBlock("编排摘要 summary.json",detail.summary)+detailJsonBlock("单元规格 spec.json",detail.spec);
-  $("unit-drawer").innerHTML=drawerShell(node,runId,unitId,body);
+function renderUnitDetail(detail,preserve=false){
+  if(!selectedUnit)return;
+  const {runId,unitId}=selectedUnit,node=findOrgNode(runId,unitId),run=findOrgRun(runId);
+  const result=detail.result||{},summary=detail.summary||{},spec=detail.spec||{};
+  const status=(node&&node.status)||result.status||"",role=(node&&node.role)||spec.role||"";
+  const terminal=!!status&&status!=="running"&&status!=="reserved";
+  const problem=["failed","timed_out","uncertain","aborted"].includes(status);
+  const body=[];
+
+  // 概览：先给人看的关键事实，原始 JSON 放到最后折叠。
+  const kv=[],model=(node&&node.model)||spec.model,family=(node&&node.family)||spec.family;
+  kv.push(["模型",`<span class="mono">${esc(model||"未指定")}</span>${family?`<span class="sub">${esc(family)}</span>`:""}`]);
+  const backendBits=[(node&&node.backend)||spec.backend,spec.sandbox&&`sandbox ${spec.sandbox}`,spec.artifact_mode].filter(Boolean);
+  if(backendBits.length)kv.push(["后端",esc(backendBits.join(" · "))]);
+  const elapsed=node&&node.elapsed_sec!=null?node.elapsed_sec:result.elapsed_sec;
+  kv.push(["耗时",`${esc(fmtSeconds(elapsed))}${spec.timeout_sec?`<span class="sub">上限 ${esc(fmtSeconds(spec.timeout_sec))}</span>`:""}`]);
+  if(result.exit_code!=null)kv.push(["退出码",`<span class="mono${result.exit_code===0?"":" drawer-error"}">${esc(result.exit_code)}</span>`]);
+  if(role==="orchestrator"){
+    const sb=summary.budget||{},alloc=node?node.budget_alloc:(spec.budget_alloc??sb.alloc),avail=node?node.available:sb.remaining_available,held=node?node.held:sb.held;
+    kv.push(["子额度",`剩余 ${esc(avail??0)} / 分配 ${esc(alloc??0)}${held?`<span class="sub drawer-warning">冻结 ${esc(held)}</span>`:""}`]);
+  }
+  if(spec.parent_id){const pn=findOrgNode(runId,spec.parent_id);
+    kv.push(["上级",pn?`<button class="link-btn" data-open-unit data-run-id="${esc(runId)}" data-unit-id="${esc(spec.parent_id)}" title="${esc(pn.task_summary||spec.parent_id)}">↑ ${esc(roleInfo(pn.role).label)} · ${esc(spec.parent_id)}</button>`
+      :`<span class="mono" style="color:var(--faint)">${esc(spec.parent_id)}（run 根）</span>`]);}
+  if(spec.depth!=null)kv.push(["深度",esc(spec.depth)]);
+  if(spec.work_dir)kv.push(["工作目录",`<span class="mono">${esc(spec.work_dir)}</span>${copyBtn(spec.work_dir,"复制","已复制工作目录")}`]);
+  if(spec.write_policy)kv.push(["写入策略",esc(spec.write_policy)]);
+  if(spec.created_at)kv.push(["创建",`<span class="mono">${esc(fmtDateTime(spec.created_at))}</span>`]);
+  body.push(`<section class="drawer-section lead"><dl class="kv-grid">${kv.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></section>`);
+
+  // 问题：失败原因与警告前置，失败单元一眼可见。
+  const errReason=result.error_reason||(node&&node.error_reason);
+  const warnings=[...new Set([...(node&&Array.isArray(node.warnings)?node.warnings:[]),...(Array.isArray(result.warnings)?result.warnings:[]),
+    ...(Array.isArray(spec.spawn_warnings)?spec.spawn_warnings:[])].map(x=>typeof x==="string"?x:pretty(x)))];
+  if(errReason||warnings.length){
+    let h=`<section class="drawer-section"><h3>问题</h3>`;
+    if(errReason)h+=`<div class="issue-block"><div class="lbl">失败原因</div><ul class="issue-list err"><li>${esc(errReason)}</li></ul></div>`;
+    if(warnings.length)h+=`<div class="issue-block"><div class="lbl">警告 (${warnings.length})</div><ul class="issue-list warn">${warnings.map(w=>`<li>${esc(w)}</li>`).join("")}</ul></div>`;
+    body.push(h+"</section>");
+  }
+
+  // 任务原文：正文置顶，自动注入的速查 / 契约块默认折叠。
+  const pp=splitPrompt(detail.prompt_preview||"");
+  const promptPath=run&&run.run_dir?joinPath(run.run_dir,"units",unitId,"prompt.txt"):"";
+  const maybeTrunc=!!detail.prompt_preview&&new TextEncoder().encode(detail.prompt_preview).length>=4000;
+  let ph=`<section class="drawer-section"><div class="sec-head"><h3>任务原文</h3><span class="sec-tools">${copyBtn(pp.body,"复制正文","已复制任务正文")}${copyBtn(promptPath,"复制 prompt.txt 路径","已复制 prompt.txt 路径")}</span></div>`;
+  ph+=detail.prompt_preview?`<pre class="prompt-body">${esc(pp.body||"（除系统注入块外没有任务正文）")}</pre>`:'<p style="color:var(--faint)">没有 prompt 预览</p>';
+  if(maybeTrunc)ph+=`<div class="drawer-note">预览只读取 prompt.txt 前 4 KB，可能已截断；完整原文见 prompt.txt。</div>`;
+  pp.blocks.forEach((b,i)=>{ph+=det(`boiler-${i}`,`系统注入 · <span class="tag">${esc(b.tag)}</span> <span class="n">${lineCount(b.text)} 行${b.truncated?" · 截断":""}</span>`,`<pre>${esc(b.text)}</pre>`,false,"boiler");});
+  body.push(ph+"</section>");
+
+  // 裁决：编排器写入 summary.json 的结论。
+  const decision=summary.decision??(node&&node.decision);
+  const unresolved=Array.isArray(summary.unresolved)?summary.unresolved.filter(x=>x!=null&&x!==""):[];
+  if(decision||unresolved.length||summary.self_executed){
+    let h=`<section class="drawer-section"><h3>裁决 / 交接结论</h3>`;
+    if(decision)h+=`<div class="decision-card">${esc(pretty(decision))}</div>`;
+    if(unresolved.length)h+=`<div class="issue-block" style="margin-top:9px"><div class="lbl">未解决 (${unresolved.length})</div><ul class="issue-list warn">${unresolved.map(u=>`<li>${esc(pretty(u))}</li>`).join("")}</ul></div>`;
+    if(summary.self_executed)h+=`<div class="drawer-note warn">⚠ self_executed=true：编排器自报部分交付由自己完成，而非委派。</div>`;
+    body.push(h+"</section>");
+  }else if(role==="orchestrator"&&terminal){
+    body.push(`<section class="drawer-section"><h3>裁决 / 交接结论</h3><div class="drawer-note warn">编排器已结束，但 summary.json 中没有 decision。</div></section>`);
+  }
+
+  // 交付物：已登记产物 ∪ 期望产物，缺失项单独标出。
+  const arts=(Array.isArray(result.artifacts)?result.artifacts:(node&&node.artifacts)||[]).filter(a=>a&&typeof a.path==="string");
+  const expected=Array.isArray(spec.expected_outputs)?spec.expected_outputs.filter(p=>typeof p==="string"&&p):[];
+  const expSet=new Set(expected.map(normPath)),artSet=new Set(arts.map(a=>normPath(a.path)));
+  const rows=arts.map(a=>{const dir=dirName(a.path),sha=String(a.sha256||"");
+    return `<div class="path-row"><div class="path-main"><div class="path-name">${esc(baseName(a.path))}</div>${dir?`<div class="path-dir" title="${esc(a.path)}">${esc(dir)}</div>`:""}
+      <div class="path-meta"><span>${esc(fmtSize(a.size))}</span>${sha?`<span title="SHA-256 ${esc(sha)}">sha256 ${esc(sha.slice(0,12))}…</span>`:""}${expSet.has(normPath(a.path))?'<span class="ok">✓ 期望产物</span>':""}</div></div>
+      <div class="path-tools">${copyBtn(a.path,"复制路径","已复制产物路径")}${copyBtn(sha,"复制哈希","已复制 SHA-256")}</div></div>`;});
+  for(const p of expected.filter(p=>!artSet.has(normPath(p))))
+    rows.push(`<div class="path-row missing"><div class="path-main"><div class="path-name">${esc(baseName(p))}</div>${dirName(p)?`<div class="path-dir">${esc(dirName(p))}</div>`:""}
+      <div class="path-meta">${terminal?'<span class="miss">✕ 期望产物未登记</span>':'<span class="wait">… 等待落盘</span>'}</div></div><div class="path-tools">${copyBtn(p,"复制路径","已复制期望路径")}</div></div>`);
+  const countLabel=expected.length?`${arts.length} 已登记 · 期望 ${expected.length}`:`${arts.length}`;
+  body.push(`<section class="drawer-section"><h3>交付物 <span class="n">(${esc(countLabel)})</span></h3>${rows.length?rows.join(""):'<p style="color:var(--faint)">没有已登记产物</p>'}</section>`);
+
+  // 直接下级：可点击跳转。
+  const kids=node&&Array.isArray(node.children)?node.children.filter(k=>k&&!k.virtual):[];
+  if(kids.length)body.push(`<section class="drawer-section"><h3>直接下级 <span class="n">(${kids.length})</span></h3><div class="child-list">${kids.map(k=>{const r=roleInfo(k.role);
+    return `<button class="child-link" data-open-unit data-run-id="${esc(runId)}" data-unit-id="${esc(k.unit_id)}"><span class="role-tag role-${r.cls}">${esc(r.label)}</span><span class="t" title="${esc(k.task_summary||k.unit_id)}">${esc(k.task_summary||k.unit_id)}</span>${orgStatusBadge(k.status)}</button>`;}).join("")}</div></section>`);
+
+  // 日志：异常单元默认展开。
+  const logs=[];
+  if(detail.error_tail)logs.push(det("error-tail",`error.log 尾部 <span class="n">${lineCount(detail.error_tail)} 行</span>`,`<pre class="drawer-error">${esc(detail.error_tail)}</pre>`,problem));
+  if(detail.stderr_tail)logs.push(det("stderr-tail",`stderr.log 尾部 <span class="n">${lineCount(detail.stderr_tail)} 行</span>`,`<pre>${esc(detail.stderr_tail)}</pre>`,problem&&!detail.error_tail));
+  if(logs.length)body.push(`<section class="drawer-section"><h3>日志</h3>${logs.join("")}</section>`);
+
+  const raws=[["result","result.json",detail.result],["summary","summary.json",detail.summary],["spec","spec.json",detail.spec]].filter(x=>x[2]!=null);
+  if(raws.length)body.push(`<section class="drawer-section"><h3>原始证据 JSON</h3>${raws.map(([k,name,v])=>det(`raw-${k}`,`<span class="tag">${name}</span>`,`<pre>${esc(pretty(v))}</pre>`)).join("")}</section>`);
+
+  const drawer=$("unit-drawer"),prev=drawer.querySelector(".drawer-body"),scroll=preserve&&prev?prev.scrollTop:0;
+  drawer.innerHTML=drawerShell(node,runId,unitId,body.join(""));
+  if(scroll){const nb=drawer.querySelector(".drawer-body");if(nb)nb.scrollTop=scroll;}
+  drawerSig=nodeSig(node);
 }
 function updateOrgSelection(){
   document.querySelectorAll("[data-open-unit]").forEach(el=>{
     const on=!!selectedUnit&&el.dataset.runId===selectedUnit.runId&&el.dataset.unitId===selectedUnit.unitId;
-    el.setAttribute("aria-pressed",String(on));if(el.classList.contains("org-node-card"))el.classList.toggle("selected",on);
+    el.setAttribute("aria-pressed",String(on));
+    if(el.classList.contains("org-node-card"))el.classList.toggle("selected",on);
+    if(el.classList.contains("table-unit")){const tr=el.closest("tr");if(tr)tr.classList.toggle("selected",on);}
   });
 }
-async function openUnit(runId,unitId,force=false){
+async function openUnit(runId,unitId,opts={}){
+  const force=!!opts.force,silent=!!opts.silent;
+  const same=!!selectedUnit&&selectedUnit.runId===String(runId)&&selectedUnit.unitId===String(unitId);
   selectedUnit={runId:String(runId),unitId:String(unitId)};const key=unitKey(runId,unitId),seq=++unitReqSeq;
-  $("unit-drawer").hidden=false;$("drawer-backdrop").hidden=false;document.body.classList.add("drawer-open");updateOrgSelection();
-  const cached=unitDetailCache.get(key);
-  if(cached&&!force){renderUnitDetail(cached);return;}
-  const node=findOrgNode(runId,unitId);$("unit-drawer").innerHTML=drawerShell(node,runId,unitId,'<div class="drawer-loading">正在读取单元证据…</div>');
+  const drawer=$("unit-drawer");
+  drawer.hidden=false;$("drawer-backdrop").hidden=false;document.body.classList.add("drawer-open");updateOrgSelection();
+  const node=findOrgNode(runId,unitId),sig=nodeSig(node),cached=unitDetailCache.get(key);
+  // 缓存按单元状态签名失效：运行中的单元状态一变就重新读取，不再展示过期证据。
+  if(cached&&!force&&cached.sig===sig){renderUnitDetail(cached.detail,same);return;}
+  if(!silent)drawer.innerHTML=drawerShell(node,runId,unitId,'<div class="drawer-loading">正在读取单元证据…</div>');
   try{
     const resp=await fetch(`/api/org-unit?run_id=${encodeURIComponent(runId)}&unit_id=${encodeURIComponent(unitId)}`);
-    const detail=await resp.json();if(!resp.ok)throw new Error(detail.error||"读取失败");
+    const detail=await resp.json().catch(()=>({}));if(!resp.ok)throw new Error(detail.error||`读取失败（HTTP ${resp.status}）`);
     if(seq!==unitReqSeq||!selectedUnit||selectedUnit.runId!==String(runId)||selectedUnit.unitId!==String(unitId))return;
-    unitDetailCache.set(key,detail);renderUnitDetail(detail);
+    unitDetailCache.set(key,{sig,detail});renderUnitDetail(detail,same||silent);
   }catch(e){
-    if(seq!==unitReqSeq)return;$("unit-drawer").innerHTML=drawerShell(node,runId,unitId,
-      `${emptyPanel("无法读取单元详情",e.message||"请求失败",'<button id="btn-unit-reload">重试</button>')}`);
+    if(seq!==unitReqSeq||silent)return;
+    drawer.innerHTML=drawerShell(node,runId,unitId,emptyPanel("无法读取单元详情",e.message||"请求失败",'<button id="btn-unit-retry">重试</button>'));
   }
 }
-function closeUnitDrawer(){
-  selectedUnit=null;unitReqSeq++;$("unit-drawer").hidden=true;$("drawer-backdrop").hidden=true;
+function syncDrawerWithData(){
+  // 轮询发现所选单元状态变化时静默刷新抽屉；用户正在抽屉内选择文本时推迟。
+  if(!selectedUnit||$("unit-drawer").hidden)return;
+  const node=findOrgNode(selectedUnit.runId,selectedUnit.unitId),sig=nodeSig(node);
+  if(!node||sig===drawerSig)return;
+  const sel=window.getSelection&&window.getSelection();
+  if(sel&&!sel.isCollapsed&&$("unit-drawer").contains(sel.anchorNode))return;
+  drawerSig=sig;openUnit(selectedUnit.runId,selectedUnit.unitId,{silent:true});
+}
+function closeUnitDrawer(restoreFocus=false){
+  const prev=selectedUnit;selectedUnit=null;unitReqSeq++;drawerSig="";
+  $("unit-drawer").hidden=true;$("drawer-backdrop").hidden=true;
   document.body.classList.remove("drawer-open");updateOrgSelection();
+  if(restoreFocus&&prev&&typeof CSS!=="undefined"&&CSS.escape){
+    const el=document.querySelector(`main [data-open-unit][data-run-id="${CSS.escape(prev.runId)}"][data-unit-id="${CSS.escape(prev.unitId)}"]`);
+    if(el)el.focus({preventScroll:true});
+  }
 }
 $("chips").addEventListener("click",e=>{
   const chip=e.target.closest(".chip[data-st]");if(!chip)return;
@@ -888,11 +1128,10 @@ document.addEventListener("click",async e=>{
   if(openBtn){openUnit(openBtn.dataset.runId,openBtn.dataset.unitId);return;}
   const nodeToggle=e.target.closest("[data-node-toggle]");
   if(nodeToggle){const key=nodeToggle.dataset.nodeToggle;collapsedOrgNodes.has(key)?collapsedOrgNodes.delete(key):collapsedOrgNodes.add(key);render();return;}
-  const copyBtn=e.target.closest("[data-copy-value]");
-  if(copyBtn){copyText(copyBtn.dataset.copyValue,copyBtn.dataset.copyMsg||"已复制");return;}
-  if(e.target.closest("#btn-drawer-close")||e.target.id==="drawer-backdrop"){closeUnitDrawer();return;}
-  if(e.target.closest("#btn-unit-reload")){if(selectedUnit)openUnit(selectedUnit.runId,selectedUnit.unitId,true);return;}
-  if(e.target.closest("#btn-copy-unit")){if(selectedUnit)copyText(selectedUnit.unitId,"已复制单元 ID");return;}
+  const cbtn=e.target.closest("[data-copy-value]");
+  if(cbtn){copyText(cbtn.dataset.copyValue,cbtn.dataset.copyMsg||"已复制");return;}
+  if(e.target.closest("#btn-drawer-close")){closeUnitDrawer(true);return;}
+  if(e.target.closest("#btn-unit-reload,#btn-unit-retry")){if(selectedUnit)openUnit(selectedUnit.runId,selectedUnit.unitId,{force:true});return;}
   const gbtn=e.target.closest("[data-gact]");
   if(gbtn){
     const g=gbtn.dataset.group,act=gbtn.dataset.gact;
@@ -929,22 +1168,24 @@ document.addEventListener("click",async e=>{
   if(btn.dataset.act==="hide"){if(isArchived(w))unarchiveOne(w);else hidden.add(w.key);
     saveSet("ocsr-board-hidden",hidden);saveSet("ocsr-board-hidden-groups",hiddenGroups);render();}
 });
-document.addEventListener("dragstart",e=>{const c=e.target.closest("[data-key]");if(!c||activeTab!=="workers")return;
-  dragging=c.dataset.key;e.dataTransfer.setData("text/plain",dragging);});
+document.addEventListener("dragstart",e=>{const c=e.target.closest&&e.target.closest("[data-key]");if(!c||activeTab!=="workers")return;
+  dragging=c.dataset.key;e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",dragging);});
+function clearDropHints(){document.querySelectorAll(".drop-hint").forEach(el=>el.classList.remove("drop-hint"));}
 function flushRender(){if(needsRender&&!dragging&&!suspend)render();}
-document.addEventListener("dragend",()=>{dragging=null;suspend=false;flushRender();});
+document.addEventListener("dragend",()=>{dragging=null;suspend=false;clearDropHints();flushRender();});
 document.addEventListener("pointerdown",e=>{if(e.target.closest("[data-key]"))suspend=true;});
 document.addEventListener("pointerup",()=>{suspend=false;flushRender();});
 document.addEventListener("pointercancel",()=>{suspend=false;flushRender();});
-window.addEventListener("blur",()=>{suspend=false;dragging=null;flushRender();});
-document.addEventListener("dragover",e=>{const g=e.target.closest(".group-title");if(!g||activeTab!=="workers")return;e.preventDefault();g.classList.add("drop-hint");});
-document.addEventListener("dragleave",e=>{const g=e.target.closest(".group-title");if(g)g.classList.remove("drop-hint");});
+window.addEventListener("blur",()=>{suspend=false;dragging=null;clearDropHints();flushRender();});
+document.addEventListener("dragover",e=>{const g=e.target.closest&&e.target.closest(".group-title");if(!g||!dragging||activeTab!=="workers")return;
+  e.preventDefault();e.dataTransfer.dropEffect="move";if(!g.classList.contains("drop-hint")){clearDropHints();g.classList.add("drop-hint");}});
+document.addEventListener("dragleave",e=>{const g=e.target.closest&&e.target.closest(".group-title");if(g&&!g.contains(e.relatedTarget))g.classList.remove("drop-hint");});
 document.addEventListener("drop",async e=>{
-  const g=e.target.closest(".group-title");if(!g||!dragging||activeTab!=="workers")return;e.preventDefault();g.classList.remove("drop-hint");
-  const target=g.dataset.group,key=dragging;dragging=null;const w=DATA.workers.find(x=>x.key===key);
-  if(w&&(w.cwd||"（未知工作目录）")===target&&!DATA.assignments[key]){flushRender();return;}
+  const g=e.target.closest&&e.target.closest(".group-title");clearDropHints();if(!g||!dragging||activeTab!=="workers")return;e.preventDefault();
+  const target=g.dataset.group,key=dragging;dragging=null;suspend=false;const w=DATA.workers.find(x=>x.key===key);
+  if(!w||groupOf(w)===target){flushRender();return;}
   try{const resp=await fetch("/api/groups",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,group:target})});
-    const data=await resp.json();if(!resp.ok){toast(data.error||"分组保存失败");return;}DATA.assignments=data.assignments||{};pendingGroups.add(target);
+    const data=await resp.json();if(!resp.ok){toast(data.error||"分组保存失败");return;}DATA.assignments=data.assignments||{};
     render();toast(`已归入「${target}」`);load();}catch(err){toast("分组保存失败");}
 });
 $("new-group").addEventListener("keydown",async e=>{if(e.key!=="Enter")return;const name=e.target.value.trim();if(!name)return;
@@ -965,9 +1206,11 @@ $("btn-archive-done").addEventListener("click",()=>{
   for(const w of done)hidden.add(w.key);saveSet("ocsr-board-hidden",hidden);render();toast(`已归档 ${done.length} 张，点「已归档」可查看或恢复`);
 });
 document.addEventListener("toggle",e=>{
-  if(e.target.tagName!=="DETAILS")return;
-  if(e.target.dataset.dt){e.target.open?detailKeys.add(e.target.dataset.dt):detailKeys.delete(e.target.dataset.dt);return;}
-  if(e.target.dataset.orgRun){orgRunOpen.set(e.target.dataset.orgRun,e.target.open);}
+  const d=e.target;if(!d||d.tagName!=="DETAILS"||!d.isConnected)return;
+  if(d.dataset.dt){d.open?detailKeys.add(d.dataset.dt):detailKeys.delete(d.dataset.dt);return;}
+  if(d.dataset.orgRun){orgRunOpen.set(d.dataset.orgRun,d.open);return;}
+  if(d.dataset.dkey&&selectedUnit&&$("unit-drawer").contains(d)){const k=unitKey(selectedUnit.runId,selectedUnit.unitId);
+    if(!drawerOpenState.has(k))drawerOpenState.set(k,new Map());drawerOpenState.get(k).set(d.dataset.dkey,d.open);}
 },true);
 for(const id of["f-status","f-model","f-time"]){
   const handler=()=>{readControls();render();};$(id).addEventListener("input",handler);$(id).addEventListener("change",handler);
@@ -987,8 +1230,12 @@ $("btn-shutdown").addEventListener("click",async()=>{
   try{await fetch("/api/shutdown",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});}catch(e){}
   document.body.innerHTML='<div style="padding:40px;color:#9aa8b7;background:#0b0e12;min-height:100vh;font:14px monospace">面板已退出。重新启动：python scripts/ocsr_board.py 或双击 启动面板.bat</div>';
 });
-document.addEventListener("keydown",e=>{if(e.key==="Escape"&&selectedUnit)closeUnitDrawer();});
-$("drawer-backdrop").addEventListener("click",closeUnitDrawer);
+document.addEventListener("keydown",e=>{
+  if(e.key!=="Escape"||!selectedUnit||e.defaultPrevented)return;
+  const ae=document.activeElement;if(ae&&ae.matches("input,select,textarea")&&!$("unit-drawer").contains(ae))return;
+  closeUnitDrawer(true);
+});
+$("drawer-backdrop").addEventListener("click",()=>closeUnitDrawer(false));
 async function poll(){
   try{await load();pollMs=DATA.workers.some(w=>w.badge==="active")||(DATA.org_runs||[]).some(r=>r.run_status==="active")?5000:15000;}
   finally{if(!shuttingDown)setTimeout(poll,pollMs);}
