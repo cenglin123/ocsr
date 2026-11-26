@@ -15,6 +15,18 @@ OCSR（OpenCode Subagents Run）以 headless `opencode run` 派发可选模型�
 
 子代理没有本对话的隐含约定；把缺失约束作为「上下文残差」写进 prompt。不要相信其“完成”自述，只相信指定文件的验收证据。
 
+## 选择入口：单发 vs 组织树
+
+- **多角色协作 / 多阶段任务**（如 `orchestrator → 多个 worker → reviewer`、动态拆批并发、需要树形预算与工作树写互斥、或在看板查看组织树拓扑）：**优先使用 `scripts/ocsr_org.py`**（详规见 [`refs/org-orchestration.md`](refs/org-orchestration.md)；`converge` 流程内暂禁用）：
+  ```powershell
+  python scripts/ocsr_org.py init "任务目标" --budget 6
+  python scripts/ocsr_org.py spawn <orchestrator|worker|reviewer> -m <model> -p <指令或文件> [--budget K] [--target <uid>] [--worktree <dir>] [--wait]
+  python scripts/ocsr_org.py wait [unit_id...] [--any]
+  python scripts/ocsr_org.py status [unit_id]
+  python scripts/ocsr_org.py stop [unit_id]
+  ```
+- **单次独立任务**（1 个 worker、简单单轮审查、需 `--resume-from` 返工、或在 `converge` 流程内）：使用 `scripts/ocsr_dispatch.py`（见下方默认闭环）。
+
 ## 默认单 worker 闭环
 
 ### 1. 固定模型、调用上限与路径
