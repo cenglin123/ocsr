@@ -20,7 +20,7 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 
 - **host 平面 runtime provider**：`lib/index.js` 在 `ctx.skills.registerProvider(...)` 注册，provider 对象名 `ocsr`（Cordis 插件名 `ocsr-skill`）。它只负责让技能目录/元数据在 host 平面 `skills` registry 存在且可达；`resourceBase` 为 `{ kind: 'directory', path: <包根目录> }`，`scripts/`、`refs/` 相对引用可解析。0.2.2 的 provider 契约（`registerProvider(control)`、candidate/definition、`BUNDLED_SKILL_RANK`、`control.invalidate()`）实测兼容，`lib/index.js` 未改。
 - **`tool-skill` 挂载条件（重要）**：在 `web` profile 下，“模型调用 skill 工具”还要求当前激活的 agent preset 挂载 `tool-skill`。实测 dsh 0.2.2-rc.1（`@deepseek-ai/dsh-web-app` 的 `presets/*.patch.yml`）：preset 名单为 `minimal`、`standard`、`ptc`、`cordis`（旧 `code` 已移除，新增 `ptc`）；`minimal` **不**挂载 `tool-skill`，`standard`、`ptc`、`cordis` 均挂载（并含 `skill-filesystem`）。provider 只保证技能存在，不保证任意 preset 向模型暴露 skill 工具。
-- **一等工具**：`lib/tool-ocsr.js` 用 `defineTool` 注册 `ocsr_dispatch`（`inject=['tools']`、`ctx.tools.register(...)`），把 schema 参数映射为 `python scripts/ocsr_dispatch.py dispatch ...`；编排语义只在 Python（薄壳）。`package.json` 的 exports 只暴露 `.` 与 `./tool`，对应上述两个 entry。
+- **一等工具**：`lib/tool-ocsr.js` 用 `defineTool` 注册 `ocsr_dispatch`（`inject=['tools']`、`ctx.tools.register(...)`），把 schema 参数映射为 `python scripts/ocsr_dispatch.py dispatch ...`；编排语义只在 Python（薄壳）。`package.json` 的 exports 只暴露 `.` 与 `./tool`，对应上述两个 entry。dsh 适配层当前只支持默认 `backend=opencode`：schema 接受 `backend`/`sandbox`/`reasoning_effort`/`artifact_mode` 以便与 driver 侧保持同形，但除默认值外一律 fail-closed 返回 `code 4`（`artifact_mode` 仅允许 `worker-write`），不会静默回退或丢参数。
 - **background 契约（0.2.2 jobs）**：`background:true` 时经 `ctx.get('jobs')` 取 jobs 服务并 `jobs.start({ kind, label, owner?, run })`；`run(job)` 内用 `job.append(...)` 写 registry 输出环（stderr 用 `{ channel: 'stderr' }`），返回 `{ cancel, done }`，`done` 解析 `{ status: 'completed' | 'killed' | 'failed', detail? }`；`job_output`/`job_kill` 读到的就是同一输出环。`owner` 取 `exec.agent?.id`（SessionId），无 agent 时省略即 unowned。jobs 服务未挂载时工具返回 `code 5`。
 - **不改核心语义**：适配层只做映射/包装，不复制派发语义；`scripts/ocsr_dispatch.py` 是编排的唯一实现。
 
@@ -32,7 +32,7 @@ dsh 适配层是 OCSR 的“技能级原生”接入面：让本仓库以一个 
 
 ## 版本锁定
 
-- 实测基线：DeepSeek Harness desktop `0.2.2-rc.3`（2026-11-17 复核，`engines.dsh ^0.2.2-rc.1` 覆盖），其中 `@deepseek-ai/cordis` 4.1.0、`@deepseek-ai/schemastery` 3.19.0、`@deepseek-ai/dsh-{skill,tools,jobs}` 均为 0.2.2-rc.3；rc.3 宿主包下 `tests/adapter` 11 项全过。此前基线为 `0.2.2-rc.1`（全局安装 checkout）。
+- 实测基线：DeepSeek Harness desktop `0.2.2-rc.5`（2026-11-27 复核，`engines.dsh ^0.2.2-rc.1` 覆盖），其中 `@deepseek-ai/cordis` 4.1.0、`@deepseek-ai/schemastery` 3.19.0、`@deepseek-ai/dsh-{skill,tools,jobs}` 均为 0.2.2-rc.5；rc.5 宿主包下 `evaluatePluginCompatibility` 返回可兼容、`tests/adapter` 11 项全过。此前基线为 `0.2.2-rc.3` 与 `0.2.2-rc.1`。桌面 profile 以 git 源安装时由 pnpm 锁到安装时的 commit，升级插件需重新安装（remove + add）以重新解析到最新提交。
 - `package.json`：`engines.dsh ^0.2.2-rc.1`；peerDependencies `@deepseek-ai/cordis ^4.1.0`、`@deepseek-ai/dsh-skill ^0.2.2-rc.1`、`@deepseek-ai/dsh-tools ^0.2.2-rc.1`、`@deepseek-ai/schemastery ^3.19.0`；dependencies `yaml ^2.8.1`。jobs/settings/session/projection 相关的旧 peer 已全部移除（jobs 只经 `ctx.get('jobs')` 取用，声明成 peer 也会误伤未挂载 jobs 的 profile）。
 - 升级宿主时先复核这些接口：`skills.registerProvider(control)` 与 provider/candidate/definition 契约（含 `BUNDLED_SKILL_RANK`、`control.invalidate()`）；`defineTool` 的 parameters/output schema 与 `exec.agent?.id`；jobs 的 `JobSpec`/`JobHandle.append`/`JobHooks`（`cancel` 与 `done` 的 `completed|killed|failed` 状态）；`ctx.get('jobs')`；插件 `Config` 的 schemastery 校验；`dsh.bundle.patch` 的 entry 语法与 agent preset 名单/`tool-skill` 挂载。
 

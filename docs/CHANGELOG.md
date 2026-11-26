@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-11-27
+
+### dsh 0.2.2-rc.5 适配复核与桌面 profile 更新
+
+#### 变更内容
+- 复核最新 main（`16aacd8`）对 dsh 0.2.2-rc.5 的适配：用 rc.5 的 `dsh-app-boot` 实测 `evaluatePluginCompatibility(package.json)` 返回可兼容；以 rc.5 的 `@deepseek-ai/*` 宿主包运行 `tests/adapter`，11 项全部通过（版本门、真实 SkillRegistry、tool/Config、jobs 输出环与状态映射等）。
+- 适配层相对上次安装的唯一差异：`lib/tool-ocsr.js` 新增 `backend`/`sandbox`/`reasoning_effort`/`artifact_mode` 形参，并对 `backend=opencode` 以外及非 `worker-write` 的 `artifact_mode` fail-closed 返回 `code 4`；`lib/index.js`、`lib/model-gate.js` 未变。
+- 桌面 profile 的 git 安装原本由 pnpm 锁在 `be977bc`；已 remove + 重新安装，锁定到最新提交 `16aacd8`，installed `lib/*.js` 哈希与仓库一致，两个 entry 在 rc.5 下 active。
+- `refs/dsh-integration.md` 版本锁定更新为 rc.5（并记录 git 安装的 commit 锁定/升级方式），一等工具小节补充 dsh 适配层仅支持 `backend=opencode` 的边界。
+
+#### 迁移影响
+- 以 git 源安装的 profile 不会自动跟随新提交；升级插件需 `remove` 后重新 `add`（或安装指定 commit）。
+- 无宿主 API 破坏性变更；`engines.dsh ^0.2.2-rc.1` 继续覆盖 rc.5。
+
 ## 2026-11-24
 
 ### 多后端执行抽象与 Codex CLI 后端（Phase 0/1/2/2.5）
